@@ -17,6 +17,14 @@ pub struct FileEntry {
 /// `threads` 参数用于控制扫描时使用的工作线程数。为了健壮性，如果传入 0，
 /// 将自动退化为使用单线程。
 pub fn scan(root: &Path, min_size: u64, threads: usize) -> std::io::Result<Vec<FileEntry>> {
+    // 显式校验 root 是否存在，避免对不存在路径进行静默扫描。
+    if !root.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("scan root does not exist: {}", root.display()),
+        ));
+    }
+
     // 额外保护：虽然 CLI 层已经禁止了 0，但库层仍做一次防御性处理。
     let threads = threads.max(1);
 
