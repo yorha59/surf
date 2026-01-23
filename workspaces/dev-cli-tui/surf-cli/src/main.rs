@@ -31,6 +31,26 @@ struct Args {
         default_value_t = num_cpus::get(),
     )]
     threads: usize,
+
+    /// Start JSON-RPC service mode instead of one-off scan.
+    ///
+    /// 对应 PRD 3.2.2 / 参数表中的 `--service` / `-s`，用于启动服务模式。
+    /// 当前实现仅完成参数解析和错误信息提示，具体服务逻辑将在 dev-service-api
+    /// 工作区中实现后再接入。
+    #[arg(long = "service", short = 's')]
+    service: bool,
+
+    /// Service listen port (default: 1234).
+    ///
+    /// 对应 PRD 中的 `--port`，仅在 `--service` 模式下生效。
+    #[arg(long = "port", default_value_t = 1234)]
+    port: u16,
+
+    /// Service listen host (default: 127.0.0.1).
+    ///
+    /// 对应 PRD 中的 `--host`，仅在 `--service` 模式下生效。
+    #[arg(long = "host", default_value = "127.0.0.1")]
+    host: String,
 }
 
 fn parse_size(input: &str) -> Result<u64, String> {
@@ -74,6 +94,19 @@ fn parse_threads(input: &str) -> Result<usize, String> {
 
 fn main() {
     let args = Args::parse();
+
+    // 服务模式（JSON-RPC）尚未在当前工作区实现，这里只提供参数占位与清晰的错误提示，
+    // 以保证 CLI 参数与 PRD 对齐，同时避免用户误以为服务已可用。
+    if args.service {
+        eprintln!(
+            "Service mode (--service) is not implemented yet in this build.\n\
+Planned behavior: start a JSON-RPC server listening on {host}:{port} as defined in PRD.\n\
+For now, please use one-off mode with: surf --path <dir> [--threads] [--min-size] [--limit] [--json]",
+            host = args.host,
+            port = args.port,
+        );
+        std::process::exit(1);
+    }
 
     let min_size = match parse_size(&args.min_size) {
         Ok(v) => v,
@@ -180,5 +213,29 @@ mod tests {
     fn threads_rejects_zero_value() {
         let res = Args::try_parse_from(["surf", "-t", "0"]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn service_mode_defaults_and_network_options() {
+        let args = Args::parse_from(["surf"]);
+        assert!(!args.service, "service mode should be disabled by default");
+        assert_eq!(args.port, 1234);
+        assert_eq!(args.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn service_mode_flags_can_be_set() {
+        let args = Args::parse_from([
+            "surf",
+            "--service",
+            "--port",
+            "4321",
+            "--host",
+            "0.0.0.0",
+        ]);
+
+        assert!(args.service);
+        assert_eq!(args.port, 4321);
+        assert_eq!(args.host, "0.0.0.0");
     }
 }
