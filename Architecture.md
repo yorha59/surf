@@ -95,6 +95,329 @@
   - 第三方：`tokio` 用于网络通信
 - **推荐负责人角色**：后端工程师
 
+> 本小节为 `dev-service-api` 开发 Agent 的主要接口约定与行为规范，开发时应以此为准。
+
+#### 4.3.1 JSON-RPC 通用约定
+
+- **协议版本**：严格遵循 JSON-RPC 2.0，所有请求与响应必须包含：
+  - `jsonrpc: "2.0"`
+  - `id: string | number | null`
+  - `method: string`
+  - `params: object`（本项目不使用 positional params）
+- **监听地址与端口**：
+  - 默认 `host = 127.0.0.1`，`port = 1234`，与 CLI 参数 `--host` / `--port` 对应。
+  - **安全默认值**：未显式指定时，仅监听本地回环地址，避免暴露到公网。
+  - 若用户将 `host` 设置为 `0.0.0.0` 等非本地地址，视为显式放宽安全策略，服务层不会再额外限制，但会在日志中进行高风险提示。
+- **传输层**：
+  - 初期实现基于 TCP + 行分隔 JSON（一个请求/响应一行），后续可按需扩展为 HTTP Transport。
+  - 统一采用 UTF-8 编码。
+- **任务 ID 约定**：
+  - 服务层为每次扫描生成唯一的 `task_id`（推荐 UUID v4 字符串，如 `"a1b2-..."`）。
+  - `task_id` 在服务进程存活期间全局唯一。
+  - 所有与特定扫描任务相关的方法均通过 `task_id` 进行路由。
+- **任务状态机**：
+  - 任务状态枚举：`queued` / `running` / `completed` / `failed` / `canceled`。
+  - 状态迁移：
+    - `queued -> running`：被调度器选中并实际调用 `surf-core` 启动扫描时。
+    - `running -> completed`：扫描正常结束。
+    - `running -> failed`：扫描过程中发生不可恢复错误（如路径不存在、IO 错误等）。
+    - `queued | running -> canceled`：用户通过 `Surf.Cancel` 取消，或服务层主动回收长时间未访问任务。
+  - 终止态：`completed` / `failed` / `canceled`，终止态任务不会再迁移到其他状态。
+- **并发与资源限制**：
+  - 服务层对**同时运行的扫描任务数**设置上限 `max_concurrent_scans`（默认 4，可通过配置或环境变量调整）。
+  - 超出上限的新任务：
+    - 接受请求并创建任务，初始状态为 `queued`；
+    - 当有运行中的任务结束时，从队列中按 FIFO 或简单优先级策略调度。
+  - PRD 中“同时 10 个扫描任务”的高并发验收，通过【已运行 + 队列中的任务总数 ≥ 10】满足，服务应保持可用且不崩溃。
+- **任务生命周期与回收**：
+  - 终止态任务在内存中保留至少 `task_ttl_seconds`（建议默认 600 秒）以便客户端查询结果。
+  - 超过 TTL 的任务将被后台清理，`Surf.GetResults` / `Surf.Status` 再访问时返回“任务不存在”错误。
+
+#### 4.3.2 JSON-RPC 错误模型
+
+- 所有错误通过 JSON-RPC 标准 `error` 对象返回：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "TASK_NOT_FOUND",
+    "data": {
+      "detail": "task_id not found: ..."
+    }
+  }
+}
+```
+
+- **通用错误码约定**（`code` 字段）：
+  - `-32600`：`INVALID_REQUEST`（标准码）—— JSON-RPC 请求结构本身非法。
+  - `-32601`：`METHOD_NOT_FOUND`（标准码）。
+  - `-32602`：`INVALID_PARAMS`（标准码）—— 参数缺失或类型错误。
+  - `-32603`：`INTERNAL_ERROR`（标准码）—— 未归类的内部异常。
+  - `-32001`：`TASK_NOT_FOUND`—— `task_id` 不存在或已被回收。
+  - `-32002`：`TASK_NOT_IN_RUNNING_STATE`—— 仅允许对 `running`/`queued` 状态任务进行的操作（如取消），目标任务已处于终止态。
+  - `-32003`：`CONCURRENCY_LIMIT_EXCEEDED`—— 服务端拒绝创建新任务且不入队（仅在未来可能的“硬拒绝策略”下使用，MVP 可以不启用）。
+  - `-32010`：`PERMISSION_DENIED`—— 目标路径权限不足或被服务配置显式禁止。
+
+- `error.data` 字段：
+  - 类型：`object`，用于补充错误上下文（如 `path`、`task_id`、底层 IO 错误信息摘要）。
+  - 对外不泄露敏感信息（如完整系统用户名、环境变量等），仅提供排查所需的最小必要信息。
+
+#### 4.3.3 `Surf.Scan` 接口
+
+> 用途：创建新的扫描任务，立即运行或进入队列，返回 `task_id` 及初始状态。
+
+- **请求**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "Surf.Scan",
+  "params": {
+    "path": "/path/to/scan",
+    "min_size": "100MB",
+    "threads": 8,
+    "limit": 100,
+    "exclude_patterns": ["**/node_modules/**"],
+    "tag": "optional-client-tag"
+  }
+}
+```
+
+- **参数说明 (`params`)**：
+  - `path: string`（必填）
+    - 起始扫描根目录，对应 CLI `--path`，允许相对路径与绝对路径。
+  - `min_size: string`（可选）
+    - 与 CLI 一致，支持 `B`/`KB`/`MB`/`GB` 单位字符串；缺省等价于 `0`。
+  - `threads: number`（可选）
+    - 并发扫描线程数，对应 CLI `--threads`；缺省时使用逻辑核心数。
+  - `limit: number`（可选）
+    - 结果 TopN 限制，对应 CLI `--limit`，影响 `Surf.GetResults` 默认输出规模。
+  - `exclude_patterns: string[]`（可选，MVP 可以忽略实现细节，仅预留字段）
+    - 路径排除规则，语义与未来 CLI 参数对齐。
+  - `tag: string`（可选）
+    - 供上层（如 GUI）打标识别此任务用途，例如 `"onboarding-initial-scan"`。
+
+- **成功响应**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "task_id": "uuid-string",
+    "state": "queued",  // 或 "running"
+    "path": "/path/to/scan",
+    "min_size_bytes": 104857600,
+    "threads": 8,
+    "limit": 100
+  }
+}
+```
+
+- **错误场景**：
+  - `INVALID_PARAMS (-32602)`：参数缺失或无法解析，如非法 `min_size` 单位。
+  - `PERMISSION_DENIED (-32010)`：对 `path` 无读取权限。
+  - `INTERNAL_ERROR (-32603)`：内部 IO 错误或 `surf-core` 初始化失败。
+
+#### 4.3.4 `Surf.Status` 接口
+
+> 用途：查询一个或多个扫描任务的实时状态与进度，用于驱动进度条或任务列表。
+
+- **请求（查询单任务）**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "Surf.Status",
+  "params": {
+    "task_id": "uuid-string"
+  }
+}
+```
+
+- **请求（查询所有活跃任务）**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "Surf.Status",
+  "params": {
+    "task_id": null
+  }
+}
+```
+
+- **参数说明**：
+  - `task_id: string | null`（可选）
+    - 为字符串时：仅查询该任务状态。
+    - 为 `null` 或未提供：返回当前所有非终止态任务的状态列表（可按实现添加分页限制，如最多返回 100 条）。
+
+- **成功响应（单任务）**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "task_id": "uuid-string",
+    "state": "running",            // queued/running/completed/failed/canceled
+    "progress": 0.42,               // 0.0 ~ 1.0，估算值
+    "scanned_files": 123456,
+    "scanned_bytes": 9876543210,
+    "total_bytes_estimate": 12345678901, // 若无法估算可为 null
+    "started_at": 1710000000,       // Unix timestamp (seconds)
+    "updated_at": 1710000100,
+    "tag": "optional-client-tag"
+  }
+}
+```
+
+- **成功响应（多任务）**：
+  - `result` 字段为上述对象的数组。
+
+- **错误场景**：
+  - `TASK_NOT_FOUND (-32001)`：查询单任务时，`task_id` 不存在或已被回收。
+
+#### 4.3.5 `Surf.GetResults` 接口
+
+> 用途：获取已完成扫描任务的结果摘要或 TopN 列表，用于表格/可视化展示。
+
+- **请求**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "Surf.GetResults",
+  "params": {
+    "task_id": "uuid-string",
+    "mode": "flat",
+    "limit": 100
+  }
+}
+```
+
+- **参数说明**：
+  - `task_id: string`（必填）
+  - `mode: string`（可选）
+    - `"flat"`：返回按大小降序排序的扁平列表（对应 CLI TopN 表格）。
+    - `"summary"`：仅返回整体统计（总文件数、总大小、起始路径）。
+    - 默认值：`"flat"`。
+  - `limit: number`（可选）
+    - 覆盖创建任务时的 `limit`，指定本次返回的最大条目数。
+
+- **成功响应示例（flat 模式）**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "result": {
+    "task_id": "uuid-string",
+    "state": "completed",          // 仅在 completed 状态下返回完整结果
+    "path": "/path/to/scan",
+    "total_files": 1234567,
+    "total_bytes": 9876543210,
+    "entries": [
+      {
+        "path": "/path/to/file1.log",
+        "size": 123456789,
+        "is_dir": false,
+        "file_type": "log",
+        "modified_at": 1709999999
+      }
+      // ... 按 size 降序，最多 limit 条
+    ]
+  }
+}
+```
+
+- **成功响应示例（summary 模式）**：
+  - 仅返回 `task_id`、`state`、`path`、`total_files`、`total_bytes` 等聚合字段，不包含 `entries`，以降低网络开销。
+
+- **错误场景**：
+  - `TASK_NOT_FOUND (-32001)`：任务不存在或已被回收。
+  - `INVALID_PARAMS (-32602)`：任务尚未进入 `completed` 状态，但请求了 `flat` 模式完整结果。实现上可以选择：
+    - 要么在 `state != completed` 时返回错误；
+    - 要么只返回已扫描部分的 TopN（需要在实现阶段进一步评估，见“风险与待确认问题”）。
+
+- **与 `surf-core` / 数据聚合层的边界**：
+  - 服务层仅缓存**聚合后的结果视图**（如 TopN 列表、总文件数与总大小等），不长期持有完整文件列表。
+  - 扫描完成后，`surf-core` + Data Aggregator 产出一次性的结果结构体；服务层将其转换为可序列化的中间结构并保存在内存中，供 `Surf.GetResults` 多次读取。
+  - 不涉及持久化存储；历史结果持久化交由 `dev-persistence` 后续扩展。
+
+#### 4.3.6 `Surf.Cancel` 接口
+
+> 用途：取消排队或正在运行的扫描任务。该操作应设计为**幂等**。
+
+- **请求**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "Surf.Cancel",
+  "params": {
+    "task_id": "uuid-string"
+  }
+}
+```
+
+- **参数说明**：
+  - `task_id: string`（必填）
+
+- **成功响应**：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "result": {
+    "task_id": "uuid-string",
+    "previous_state": "running",   // 可能为 queued/running/completed/failed/canceled
+    "current_state": "canceled"    // 若 previous_state 已是终止态，则等于 previous_state
+  }
+}
+```
+
+- **行为约定**：
+  - 如果任务处于 `queued`：从队列中移除，直接标记为 `canceled`。
+  - 如果任务处于 `running`：请求底层 `surf-core` 尽快中断扫描（例如通过取消标志）；中断完成后标记为 `canceled`。
+  - 如果任务已处于终止态（`completed`/`failed`/`canceled`）：
+    - 仍返回 200 级别的 JSON-RPC 成功响应，`current_state` 与 `previous_state` 相同，以保证幂等性。
+  - 取消操作**不删除已存在的部分结果**，`Surf.GetResults` 在终止态下仍可访问（例如部分扫描结果或失败原因摘要）。
+
+- **错误场景**：
+  - `TASK_NOT_FOUND (-32001)`：任务不存在或已被回收。
+
+#### 4.3.7 服务层资源与安全策略（面向 dev-service-api）
+
+- **资源控制**：
+  - `max_concurrent_scans`：限制同时运行的扫描任务数量，默认 4，可通过配置/环境变量调整。
+  - `task_queue_limit`：可选的队列长度上限（例如 100）；超过后可以返回 `CONCURRENCY_LIMIT_EXCEEDED`，避免内存被大量排队任务占满。
+  - 长时间运行任务：
+    - 服务层应定期更新任务的 `updated_at` 时间戳；
+    - 可选地为单个任务设置最大香蕉执行时间（如 24 小时），超时自动标记为 `failed` 并中断 `surf-core` 扫描。
+- **安全策略**：
+  - 默认只监听 `127.0.0.1`，需用户显式配置才允许远程访问。
+  - 短期内不引入复杂认证机制；若监听非本地地址，建议结合系统防火墙或反向代理进行访问控制。
+  - 对传入的 `path` 做最小合法性校验：禁止明显不合法的路径字符串，避免路径注入类问题。
+  - 不提供删除/修改文件的 JSON-RPC 方法，保持服务层只读；删除能力仅在 CLI/TUI/GUI 中通过本地操作提供。
+- **与 `surf-core` 的交互边界**：
+  - 服务层对每个任务维护一个 `ScanHandle`（实现细节由 `dev-core-scanner` 提供）：
+    - `start_scan(path, min_size, threads) -> ScanHandle`
+    - `poll_status(handle) -> StatusSnapshot`
+    - `collect_results(handle) -> AggregatedResult`
+    - `cancel(handle)`
+  - 服务层不直接操作文件系统，只通过上述 API 与扫描引擎交互。
+  - 状态轮询与结果收集由服务层的后台任务（例如基于 `tokio::spawn`）完成，前端 JSON-RPC 请求只读取最新快照，避免阻塞网络线程。
+
 ### 4.4 命令行界面 (CLI/TUI)
 - **模块职责**：
   - 解析命令行参数
@@ -157,12 +480,15 @@
 5. CLI 模块以表格形式展示结果
 
 ### 5.2 服务模式数据流
-1. 用户执行 `surf --service --port 1234` 启动服务
-2. 客户端通过 JSON-RPC 调用 `Surf.Scan` 方法
-3. 服务层接收请求，调用核心扫描引擎的 `scan()` 方法
-4. 核心扫描引擎启动并发扫描
-5. 客户端通过 `Surf.Status` 方法查询进度
-6. 扫描完成后，客户端通过 `Surf.GetResults` 方法获取结果
+1. 用户执行 `surf --service --port 1234`（或独立的 `surf-service` 可执行文件）启动服务层，监听 `127.0.0.1:1234`。
+2. 客户端（CLI/GUI 或其他应用）通过 JSON-RPC 调用 `Surf.Scan` 方法，创建新的扫描任务并获得 `task_id`。
+3. 服务层根据当前并发情况将任务置为 `running` 或 `queued`，并通过 `surf-core` 启动或排队实际扫描逻辑。
+4. 扫描进行中，客户端周期性调用 `Surf.Status`：
+   - 传入 `task_id` 获取单一任务的进度；
+   - 或传入 `null` 获取所有活跃任务的列表，用于任务面板展示。
+5. 若用户在 GUI/CLI 中选择取消某个任务，客户端调用 `Surf.Cancel`，服务层请求 `surf-core` 中断扫描并将任务标记为 `canceled`。
+6. 扫描完成或进入终止态后，客户端通过 `Surf.GetResults` 获取结果摘要或 TopN 列表，驱动表格/可视化展示。
+7. 客户端在完成展示与必要的交互后，可以不再访问该 `task_id`；服务层在 TTL 到期后自动回收该任务的内存与内部句柄。
 
 ### 5.3 GUI 模式数据流
 1. 用户打开 Surf.app，配置扫描参数
