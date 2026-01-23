@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "workspaces/dev-core-scanner/surf-core",
+  "workspaces/dev-cli-tui/surf-cli",
+]
+resolver = "2"
+

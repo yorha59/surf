@@ -88,7 +88,7 @@
   - 负责：网络通信、任务管理、协议实现
   - 不负责：文件系统扫描、数据存储
 - **对外提供的能力**：
-  - JSON-RPC 接口：`Surf.Scan`, `Surf.Status`, `Surf.GetResults`
+  - JSON-RPC 接口：`Surf.Scan`, `Surf.Status`, `Surf.GetResults`, `Surf.Cancel`
 - **依赖哪些模块**：
   - 核心扫描引擎
   - 数据聚合层
@@ -181,11 +181,64 @@
 - **并发风险**：多线程扫描可能导致系统 IO 压力过大
 
 ### 6.2 待确认问题
-- **GUI 跨平台支持**：PRD 中只提到了 macOS GUI，是否需要支持 Linux GUI？
-- **扫描快照功能**：PRD 中提到了“查看上一次的扫描快照”，需要确认具体实现方式
-- **文件删除操作**：需要确认在不同平台上的实现方式和安全性
+// 以下问题结合最新 PRD 进行了部分确认与限定：
+- **GUI 平台范围**：当前确认 **仅支持 macOS GUI**，Linux GUI 不在本阶段范围内，如未来需要再单独立项设计。
+- **扫描快照功能**：PRD 中提到“查看上一次的扫描快照（若支持快照功能）”，本阶段将快照视为**增量能力**，不作为 MVP 的必做项；后续若实现，依托「持久化存储层」存储聚合后的扫描结果摘要，而非完整文件列表。
+- **文件删除操作**：在 CLI/TUI/GUI 中统一采用“移入回收站/废纸篓 + 二次确认”的策略，不提供直接永久删除；具体调用各平台系统 API 的方式在实现阶段细化。
 
 ### 6.3 潜在风险
 - **系统资源占用**：高并发扫描可能影响系统性能
 - **网络安全**：服务模式下的 JSON-RPC 接口可能存在安全风险
 - **依赖库兼容性**：第三方库的版本更新可能导致兼容性问题
+
+## 7. 开发 Agent 拆分与工作区规划
+
+> 本节从编排视角，将上述模块拆分映射到多个开发 Agent 及其各自工作区，便于在 Surf 流程中并行开发与统一交付。
+
+### 7.1 开发 Agent 列表
+
+- **dev-core-scanner**
+  - 负责模块：核心扫描引擎 (4.1)、数据聚合层的基础结构 (4.2)
+  - 主要目标：实现高性能文件系统扫描、过滤与目录树/TopN 等聚合能力，为 CLI / Service / GUI 提供统一数据源。
+
+- **dev-service-api**
+  - 负责模块：服务层 (4.3)
+  - 主要目标：实现 JSON-RPC 2.0 接口（含 `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 等）、任务管理与并发请求处理。
+
+- **dev-cli-tui**
+  - 负责模块：命令行界面 (CLI/TUI, 4.4)
+  - 主要目标：实现命令行参数解析、进度展示、结果表格输出以及基于 `ratatui` 的交互式 TUI，包括删除操作的二次确认。
+
+- **dev-macos-gui**
+  - 负责模块：图形界面层 (GUI, 4.5)
+  - 主要目标：基于 Tauri + React 实现 macOS GUI，包括 Onboarding 流程、配置管理、Treemap/列表视图和文件操作集成。
+
+- **dev-persistence**
+  - 负责模块：持久化存储层 (4.6)
+  - 主要目标：实现配置与扫描历史的持久化，预留支持“扫描快照摘要”的能力。
+
+### 7.2 工作区与目录规划
+
+- **dev-core-scanner 工作区**：`workspaces/dev-core-scanner/`
+  - 预期产物：Rust 库 crate（如 `surf-core`），提供扫描与聚合 API；可编译单元测试与简单基准测试。
+
+- **dev-service-api 工作区**：`workspaces/dev-service-api/`
+  - 预期产物：可执行二进制（如 `surf-service`），对外监听本地 TCP 端口，提供 JSON-RPC 接口。
+
+- **dev-cli-tui 工作区**：`workspaces/dev-cli-tui/`
+  - 预期产物：可执行二进制（如 `surf`），包含 CLI + TUI 模式，依赖 `surf-core` 提供扫描能力。
+
+- **dev-macos-gui 工作区**：`workspaces/dev-macos-gui/`
+  - 预期产物：基于 Tauri 的 macOS 应用工程，构建后生成 `Surf.app`，通过 JSON-RPC 与 `surf-service` 通信。
+
+- **dev-persistence 工作区**：`workspaces/dev-persistence/`
+  - 预期产物：Rust 库 crate（如 `surf-storage`），封装 SQLite 操作，为 CLI/Service/GUI 提供统一的配置与历史记录访问接口。
+
+### 7.3 与交付阶段的产物衔接
+
+- 各开发 Agent 在其工作区内完成构建后，交付阶段的 `delivery-runner` 将按以下方式汇总：
+  - 从 `workspaces/dev-core-scanner/` 和 `workspaces/dev-cli-tui/` 获取 CLI/TUI 相关可执行文件与运行脚本。
+  - 从 `workspaces/dev-service-api/` 获取服务模式二进制与配置示例。
+  - 从 `workspaces/dev-macos-gui/` 获取打包好的 `Surf.app` 及必要的启动脚本。
+  - 从 `workspaces/dev-persistence/` 获取迁移脚本或初始化数据库逻辑说明。
+- `delivery-runner` 在自己的交付工作区 `release/` 下，按平台与形态（CLI/TUI/Service/GUI）组织最终发布产物，并在 `test/` 目录下基于 PRD 8. 验收标准设计和执行独立测试。

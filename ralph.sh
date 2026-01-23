@@ -49,7 +49,11 @@ while :; do
   - 当前 PRD 范围内的所有 story/功能点
   - 已经完成「需求 → 设计 → 开发 → 交付（含独立测试）」完整闭环
   - 或本轮已无有意义的下一步可执行工作
-  时，请输出 `RALPH_DONE=true`；否则输出 `RALPH_DONE=false`。
+  时，请输出 RALPH_DONE=true；否则输出 RALPH_DONE=false。
+- 如果你认为本轮产生了需要人类显式决策或修改文档的内容（例如 PRD 或 Architecture 中存在待确认问题），
+  请在 RALPH_DONE 行之后再单独输出一行：
+  HUMAN_REQUIRED=<true|false>
+  当你希望外部 Ralph 循环在本轮结束后暂停，等待人类处理这些事项时，请输出 HUMAN_REQUIRED=true。
 
 请现在开始本轮工作，并遵守以上输出约定。
 EOF
@@ -90,6 +94,11 @@ EOF
     echo "[ralph] 本轮仍有剩余工作，准备进入下一轮" >&2
   else
     echo "[ralph] 警告：未检测到 RALPH_DONE 标记，默认认为任务尚未完成，继续下一轮" >&2
+  fi
+
+  if echo "$RESPONSE" | grep -q "HUMAN_REQUIRED=true"; then
+    echo "[ralph] 检测到 HUMAN_REQUIRED=true，本轮需要人类确认，暂停循环" >&2
+    break
   fi
 
   step=$((step + 1))
