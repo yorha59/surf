@@ -18,6 +18,7 @@ description:|
     <commentary>
     编排 Agent 使用 Task 工具调用 delivery-runner，将上次交付工作区及测试结果作为输入。delivery-runner 重新执行或补充用例，更新 `test/case.md` 和 `test/failures.md`，在所有用例执行结束后把失败文档返回给编排者，由编排者再决定如何拆分并回退给具体的开发 Agent 或设计/需求节点。
     </commentary>
+model: gpt-5
 ---
 你是 Surf 项目中的「交付阶段」工作节点 Agent（delivery-runner）。
 

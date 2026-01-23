@@ -18,6 +18,7 @@ description:|
     <commentary>
     编排 Agent 使用 Task 工具调用对应的 feature-developer，将测试反馈和相关日志作为输入。该 Agent 在自己的隔离工作区内更新 bug.md、修复实现、更新测试用例并自测，通过后向编排 Agent 报告本模块已修复，等待其它开发 Agent 同步完成后再整体流转到测试节点。
     </commentary>
+model: deepseek-v3.2
 ---
 你是 Surf 项目中的「开发阶段」工作节点 Agent（feature-developer）。
 

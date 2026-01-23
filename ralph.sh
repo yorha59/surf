@@ -12,10 +12,135 @@ fi
 
 echo "[ralph] Surf Ralph-loop 启动，无最大迭代次数限制（需手动停止或任务完成）" >&2
 
+send_feishu_status() {
+  local text="$1"
+  local webhook="${FEISHU_WEBHOOK:-}"
+
+  # 未配置 FEISHU_WEBHOOK 时不发送
+  if [[ -z "$webhook" ]]; then
+    return 0
+  fi
+
+  # 仅发送由脚本构造的简短状态文本，避免复杂转义问题
+  curl -sS -X POST "$webhook" \
+    -H 'Content-Type: application/json' \
+    -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$text\"}}" \
+    >/dev/null || true
+}
+
+ralph_git_guard_with_coco() {
+  # 通过 RALPH_GIT_GUARD=0 可关闭该检查
+  if [[ "${RALPH_GIT_GUARD:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  if ! command -v coco >/dev/null 2>&1; then
+    echo "[ralph] 警告：未找到 coco CLI，跳过 git guard 检查" >&2
+    return 0
+  fi
+
+  # 让 Coco 作为编排者检查待提交文件中是否包含构建产物目录，
+  # 并维护根目录 .gitignore：
+  # - 对确认为构建产物且存在于仓库中的目录/路径，追加或保留 ignore 规则；
+  # - 对 .gitignore 中已经不存在且不再需要的路径，可以适当清理；
+  # 然后在回复中总结变更，并给出 GIT_GUARD_OK=<true|false> 标记。
+  local GUARD_PROMPT
+  GUARD_PROMPT=$(cat <<'EOF'
+你现在的角色是 Surf 仓库的编排者，专门负责在自动提交前进行一次「git 提交安全检查」。
+
+当前工作目录是 Surf 仓库根目录，请你在本轮中只做下面这件事：
+
+1. 使用 Bash 工具运行：git status --porcelain
+   - 检查当前待提交/已修改的文件和目录。
+   - 重点识别「明显属于构建产物或缓存」的路径，例如但不限于：
+     - Rust / Cargo 构建目录：target/ 及其子目录；
+     - 一般构建输出：dist/、build/、release/ 等；
+     - 前端常见产物：.next/、out/、node_modules/ 等；
+     - 各 workspaces/* 子 crate 或子工程中的上述目录；
+     - 其它通过 git status 可以明显判断为构建产物的目录。
+
+2. 使用 Read / ApplyPatch 工具检查并维护根目录 .gitignore：
+   - 为被你判定为构建产物、且实际存在于仓库中的目录或文件模式，追加或保持 ignore 规则；
+   - 对 .gitignore 中指向已经不存在且不再需要的具体路径，可以适度清理；
+   - 保持规则「最小必要修改」：
+     - 尽量只增加缺失的构建产物模式；
+     - 删除时仅删除明显无效且不会影响现有忽略行为的条目。
+
+3. 再次运行 git status --porcelain，自检：
+   - 确认输出中不再包含明显的构建产物目录或文件；
+   - 注意：源码、配置、文档等正常文件可以继续保留在 git status 中，这里只关心构建产物是否仍然可见。
+
+4. 在回复末尾，按照下面格式单独输出一行标记：
+   - 若你认为当前 git status 中已经没有明显构建产物，请输出：
+     GIT_GUARD_OK=true
+   - 若仍然发现构建产物难以通过 .gitignore 排除，或存在你无法安全判断的路径，请输出：
+     GIT_GUARD_OK=false
+
+5. 在标记行之前，用简明的中文小结：
+   - 本轮你对 .gitignore 做了哪些新增或删除；
+   - 若 GIT_GUARD_OK=false，说明原因（例如某些路径难以判断是否为构建产物）。
+
+只执行上述检查和 .gitignore 维护工作，不要再触发额外的需求/设计/开发/交付阶段操作。
+EOF
+)
+
+  echo "[ralph] 调用 coco 执行 git guard 检查 .gitignore 与构建产物..." >&2
+  # 失败时不阻断后续流程，只打印警告
+  if ! coco -y --query-timeout "${COCO_GIT_GUARD_TIMEOUT:-5m}" -p "$GUARD_PROMPT"; then
+    echo "[ralph] git guard 调用 coco 失败，后续自动提交将按当前 .gitignore 执行" >&2
+  fi
+}
+
+ralph_git_auto_commit() {
+  # 通过 RALPH_AUTO_COMMIT=0 关闭自动提交
+  if [[ "${RALPH_AUTO_COMMIT:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  # 在自动提交前调用一轮 git guard，由 Coco 维护 .gitignore 中的构建产物规则
+  ralph_git_guard_with_coco
+
+  if ! command -v git >/dev/null 2>&1; then
+    echo "[ralph] 警告：未找到 git，跳过本轮自动提交" >&2
+    return 0
+  fi
+
+  # 若无变更则不提交
+  if [[ -z "$(git status --porcelain)" ]]; then
+    echo "[ralph] 本轮无代码变更，跳过自动提交" >&2
+    return 0
+  fi
+
+  echo "[ralph] 检测到本轮有变更，准备自动提交并推送" >&2
+
+  # 依赖 .gitignore（target、__pycache__ 等）避免构建产物被加入版本控制
+  if ! git add -A; then
+    echo "[ralph] git add 失败，跳过本轮自动提交" >&2
+    return 0
+  fi
+
+  local step="$1"
+  local ts
+  ts="$(date +'%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')"
+  local msg="chore(ralph): iteration ${step:-?} ${ts:+at $ts}"
+
+  if ! git commit -m "$msg"; then
+    echo "[ralph] git commit 失败（可能无变更或钩子错误），跳过本轮自动提交" >&2
+    return 0
+  fi
+
+  if ! git push; then
+    echo "[ralph] git push 失败，请稍后手动检查远端同步" >&2
+  fi
+}
+
 step=1
 while :; do
   echo "" >&2
   echo "================ Ralph 第 $step 轮 ================" >&2
+
+  # 将当前轮次开始事件同步到飞书（如配置了 FEISHU_WEBHOOK）
+  send_feishu_status "[ralph] 第 $step 轮开始"
 
   # 为本轮构造编排 Agent 提示词
   PROMPT=$(cat <<EOF
@@ -85,19 +210,33 @@ EOF
   RESPONSE="$(cat "$TMPFILE")"
   rm -f "$TMPFILE"
 
+  done_flag="false"
+  human_flag="false"
+
   if echo "$RESPONSE" | grep -q "RALPH_DONE=true"; then
+    done_flag="true"
     echo "[ralph] 检测到 RALPH_DONE=true，本轮需求已闭环，退出循环" >&2
-    break
   fi
 
   if echo "$RESPONSE" | grep -q "RALPH_DONE=false"; then
+    done_flag="false"
     echo "[ralph] 本轮仍有剩余工作，准备进入下一轮" >&2
   else
     echo "[ralph] 警告：未检测到 RALPH_DONE 标记，默认认为任务尚未完成，继续下一轮" >&2
   fi
 
   if echo "$RESPONSE" | grep -q "HUMAN_REQUIRED=true"; then
+    human_flag="true"
     echo "[ralph] 检测到 HUMAN_REQUIRED=true，本轮需要人类确认，暂停循环" >&2
+  fi
+
+  # 将本轮结果同步到飞书（如配置了 FEISHU_WEBHOOK）
+  send_feishu_status "[ralph] 第 $step 轮结束: RALPH_DONE=${done_flag}, HUMAN_REQUIRED=${human_flag}"
+
+  # 每轮结束后由编排脚本执行一次自动提交/推送（如有变更），避免提交构建产物
+  ralph_git_auto_commit "$step"
+
+  if [[ "$done_flag" == "true" || "$human_flag" == "true" ]]; then
     break
   fi
 
