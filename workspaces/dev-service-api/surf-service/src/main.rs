@@ -325,6 +325,83 @@ mod tests {
         let response = handle_rpc_line("   ");
         assert!(response.is_none());
     }
+
+    #[test]
+    fn test_parse_size_for_service_basic_units() {
+        // 空字符串或仅空白视为 0
+        assert_eq!(parse_size_for_service("").unwrap(), 0);
+        assert_eq!(parse_size_for_service("   ").unwrap(), 0);
+
+        // 不同大小写的合法单位
+        assert_eq!(parse_size_for_service("1").unwrap(), 1);
+        assert_eq!(parse_size_for_service("1b").unwrap(), 1);
+        assert_eq!(parse_size_for_service("1B").unwrap(), 1);
+
+        assert_eq!(parse_size_for_service("1k").unwrap(), 1024);
+        assert_eq!(parse_size_for_service("1KB").unwrap(), 1024);
+
+        assert_eq!(parse_size_for_service("2m").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_size_for_service("2MB").unwrap(), 2 * 1024 * 1024);
+
+        assert_eq!(parse_size_for_service("3g").unwrap(), 3 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_for_service("3GB").unwrap(), 3 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_for_service_invalid_inputs() {
+        // 非数字前缀
+        let err = parse_size_for_service("abcMB").unwrap_err();
+        assert!(err.contains("invalid size number"));
+
+        // 不支持的单位
+        let err = parse_size_for_service("10XB").unwrap_err();
+        assert!(err.contains("unsupported size unit"));
+    }
+
+    #[test]
+    fn test_validate_surf_scan_params_ok_and_invalid() {
+        // 合法的 min_size / threads 组合
+        let ok_params = SurfScanParams {
+            path: "/tmp".to_string(),
+            min_size: Some("10MB".to_string()),
+            threads: Some(4),
+            limit: Some(10),
+            exclude_patterns: None,
+            tag: None,
+        };
+        assert!(validate_surf_scan_params(&ok_params).is_ok());
+
+        // 非法的 min_size 单位
+        let bad_min_size = SurfScanParams {
+            path: "/tmp".to_string(),
+            min_size: Some("10XB".to_string()),
+            threads: Some(4),
+            limit: None,
+            exclude_patterns: None,
+            tag: None,
+        };
+        let err = validate_surf_scan_params(&bad_min_size).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert_eq!(err.message, "INVALID_PARAMS");
+        let detail = err.data.unwrap()["detail"].as_str().unwrap();
+        assert!(detail.contains("invalid min_size"));
+
+        // 非法的 threads 值（0）
+        let bad_threads = SurfScanParams {
+            path: "/tmp".to_string(),
+            min_size: None,
+            threads: Some(0),
+            limit: None,
+            exclude_patterns: None,
+            tag: None,
+        };
+        let err = validate_surf_scan_params(&bad_threads).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert_eq!(err.message, "INVALID_PARAMS");
+        let detail = err.data.unwrap()["detail"].as_str().unwrap();
+        assert!(detail.contains("threads"));
+        assert!(detail.contains(">= 1"));
+    }
 }
 
 impl JsonRpcErrorResponse {
