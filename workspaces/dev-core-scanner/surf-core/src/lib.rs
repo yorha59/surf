@@ -177,6 +177,14 @@ impl ScanHandle {
                 let root = config_clone.root.clone();
                 let min_size = config_clone.min_size;
                 
+                // 如果已经取消，直接返回 Interrupted 错误
+                if thread_state.cancelled.load(Ordering::SeqCst) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "scan was cancelled",
+                    ));
+                }
+                
                 // 收集符合条件的文件条目
                 let entries: Vec<FileEntry> = WalkDir::new(&root)
                     .into_iter()
@@ -184,6 +192,10 @@ impl ScanHandle {
                     .par_bridge()
                     .filter_map(|entry| {
                         let metadata = entry.metadata().ok()?;
+                        // 检查取消标志，如果已取消则跳过后续处理
+                        if thread_state.cancelled.load(Ordering::SeqCst) {
+                            return None;
+                        }
 
                         if !metadata.is_file() {
                             return None;
@@ -212,11 +224,26 @@ impl ScanHandle {
                 let mut sorted_entries = entries;
                 sorted_entries.sort_by(|a, b| b.size.cmp(&a.size));
                 
-                Ok(sorted_entries)
+                // 检查是否在扫描过程中被取消
+                if thread_state.cancelled.load(Ordering::SeqCst) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "scan was cancelled",
+                    ))
+                } else {
+                    Ok(sorted_entries)
+                }
             });
 
             // 存储结果
             *thread_state.result.lock().unwrap() = Some(scan_result);
+            
+            // 根据扫描结果设置 error 字段
+            let mut error_lock = thread_state.error.lock().unwrap();
+            *error_lock = match &scan_result {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            };
             
             // 标记完成
             thread_state.done.store(true, Ordering::SeqCst);
