@@ -252,8 +252,8 @@
   - 使用 `--host` 与 `--port` 参数可以成功修改监听地址与端口，配置非法地址或端口时给出清晰错误提示并退出。
   - 在同一进程中，连续发送多次“启动扫描”“查询进度”“获取结果”请求时，服务保持稳定，不出现崩溃或资源泄漏迹象。
   - 在无请求时，服务进程保持空闲且资源占用在可接受范围内，支持通过常规信号（例如 `Ctrl+C`）优雅退出。
-  - impl_notes (iteration 8 / dev-service-api & dev-cli-tui):
-    - `workspaces/dev-service-api/surf-service/src/main.rs` 中的 `surf-service` 二进制，当前已实现较完整的 JSON-RPC 骨架能力，并在本轮迭代中引入了最小可用的内存任务管理器：
+  - impl_notes (iteration 39 / dev-service-api & dev-cli-tui):
+    - `workspaces/dev-service-api/surf-service/src/main.rs` 中的 `surf-service` 二进制，当前已实现较完整的 JSON-RPC 骨架能力，并在后续多轮迭代中引入了内存任务管理器与围绕 `Surf.Status` / `Surf.Cancel` 的最小业务实现：
       - 使用 `clap::Parser` 定义 `Args` 结构体，支持 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位用于后续并发控制）、`--task-ttl-seconds`（默认 600，对应 Architecture.md 中的 `task_ttl_seconds`），并在启动日志中打印当前配置。
       - 基于 `tokio::net::TcpListener` 在 `<host>:<port>` 上启动 TCP 监听；每当接受到新连接时，为该连接启动独立的 async 任务，通过 `handle_connection` 按行读取请求并处理。
       - 对于每一行入站数据，使用 `handle_rpc_line` 执行 JSON 解析和 JSON-RPC 2.0 校验及部分业务分发：
@@ -267,17 +267,26 @@
           - `params` 非对象时返回 `INVALID_PARAMS`，提示需要 JSON 对象；
           - `params` 为对象时，尝试反序列化为 `SurfScanParams` 并调用 `parse_size_for_service` / `validate_surf_scan_params` 校验 `min_size` 与 `threads`；
           - 结构或数值非法时返回 `INVALID_PARAMS`；合法时通过全局 `TASK_MANAGER` 注册一个 `TaskInfo`，初始状态为 `queued`，并返回 `SurfScanResult` 成功响应（包含 `task_id`、`state="queued"`、`path`、`min_size_bytes`、`threads`、`limit`）。
-        - 当方法名为 `Surf.Status` 时：
-          - `params == null` 仍视为“列出所有任务”占位能力，返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`；
-          - `params` 非对象时返回 `INVALID_PARAMS`；
-          - `task_id` 字段缺失、为空字符串或类型错误时返回 `INVALID_PARAMS`；
-          - `task_id` 为非空字符串时，尝试从 `TASK_MANAGER` 查询对应任务：存在则返回 `SurfStatusResult` 成功响应（当前进度相关字段使用占位值，`state` 由 `TaskState` 映射为 `queued`/`running`/`completed`/`failed`/`canceled`），不存在则返回 `TASK_NOT_FOUND`；
+        - 当方法名为 `Surf.Status` 时（与 Architecture.md 4.3.4 行为约定对齐的最小实现已落地）：
+          - `params` 为 `null` 时，视为“查询所有活跃任务”，通过 `TASK_MANAGER.list_non_terminated_tasks()` 列出所有处于 `Queued` / `Running` 状态的任务，并将每个任务映射为 `SurfStatusResult`；
+          - `params` 非对象时返回 `INVALID_PARAMS`，错误详情中包含 `"params must be a JSON object for method Surf.Status"`；
+          - `params` 为对象但缺少 `task_id` 字段时，同样视为“查询所有活跃任务”，行为与 `params == null` 一致；
+          - `task_id` 字段存在且显式为 `null` 时，也视为“查询所有活跃任务”，与缺省字段语义保持一致；
+          - `task_id` 为字符串：
+            - 为空字符串时返回 `INVALID_PARAMS`，错误详情提示 `"task_id must be a non-empty string or null"`；
+            - 非空字符串时，尝试从 `TASK_MANAGER` 查询对应任务：存在则返回单个 `SurfStatusResult` 成功响应（当前进度相关字段使用占位值，`state` 由 `TaskState` 映射为 `queued`/`running`/`completed`/`failed`/`canceled`），不存在则返回 `TASK_NOT_FOUND`，错误详情中带上具体 `task_id`；
+          - `task_id` 为其他类型（如数字、布尔值等）时返回 `INVALID_PARAMS`，错误详情提示 `"task_id must be a string or null"`。
         - 当方法名为 `Surf.Cancel` 时：
-          - 当前仅对 `params` 形状与 `task_id` 字段做合法性校验，任意合法但不存在的 `task_id` 一律返回 `TASK_NOT_FOUND`，尚未真正执行状态迁移或调用核心层取消逻辑；
+          - `params` 为 `null` 时仍被视为“未实现”的占位路径，返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`；
+          - `params` 非对象时返回 `INVALID_PARAMS`，错误详情中包含 `"params must be a JSON object for method Surf.Cancel"`；
+          - `params` 为对象但缺少 `task_id` 字段、或 `task_id` 为非字符串/空字符串时，返回 `INVALID_PARAMS`，错误详情分别提示 `"task_id must be a non-empty string"` / `"task_id must be a string"`；
+          - 当 `task_id` 为合法的非空字符串时，使用全局 `TASK_MANAGER.cancel_task(task_id)` 执行幂等取消逻辑：
+            - 若找到任务，则根据原状态与更新后的状态构造 `SurfCancelResult { task_id, previous_state, current_state }` 并返回成功响应，其中 `previous_state` / `current_state` 为 `queued` / `running` / `completed` / `failed` / `canceled` 之一；
+            - 若未找到任务，则返回 `TASK_NOT_FOUND`，错误详情提示 `"task_id not found: <id>"`；
         - 当方法名为 `Surf.GetResults` 时，仍仅作为错误模型占位，任何调用都返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`。
       - 对于需要返回响应的请求，服务会将 JSON-RPC 错误响应行写回客户端，并在 stderr 打印一条包含 peer 地址、原始请求行与响应内容的日志，便于后续排查协议与调用问题。
       - 文件顶部定义了 `JsonRpcRequest`、`JsonRpcError`、`JsonRpcErrorResponse` 等结构体以及 `INVALID_REQUEST` / `METHOD_NOT_FOUND` 常量，基本与 Architecture.md 4.3.2 中的错误模型保持一致（当前仅实现了部分标准错误码）。
-      - 在同一文件的 `#[cfg(test)] mod tests` 中，已针对 `handle_rpc_line` 编写多条单元测试，用于覆盖“无效 JSON”“缺少 `jsonrpc` 字段”“错误版本号”“未知方法”“已知方法但未实现”“空行跳过”等典型场景，确保当前错误处理逻辑在代码层面可回归。
+      - 在同一文件的 `#[cfg(test)] mod tests` 中，已针对 `handle_rpc_line` 编写多条单元测试，用于覆盖“无效 JSON”“缺少 `jsonrpc` 字段”“错误版本号”“未知方法”“已知方法但未实现”“空行跳过”以及 `Surf.Scan` 合法/非法参数、`Surf.Status` 单任务查询与任务列表、多种 `task_id` 形态、`Surf.Cancel` 参数校验与幂等取消等典型场景，确保当前错误处理与任务元数据访问逻辑在代码层面可回归。
     - `workspaces/dev-cli-tui/surf-cli/src/main.rs` 中，CLI 形态已支持服务模式开关与参数透传：
       - `Args` 定义了 `--service` / `-s` 布尔开关，以及 `--host` / `--port` 参数；当 `--service` 为真时，CLI 调用 `run_service(host, port)` 启动名为 `"surf-service"` 的子进程，并在子进程退出后直接结束当前进程。
       - `run_service` 通过 `Command::new("surf-service").arg("--host").arg(host).arg("--port").arg(port).status()` 启动服务，对子进程启动失败或非零退出码仅打印错误信息到 stderr；当前 CLI 仍仅扮演“本地服务进程启动入口”，尚未提供任何 JSON-RPC 客户端封装或健康检查命令。
