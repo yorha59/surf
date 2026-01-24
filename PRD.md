@@ -213,7 +213,8 @@
       - `--path <temp_dir> --min-size 10 --limit 1 --json` 成功路径，验证 stdout 为合法 JSON、`root` 与临时目录一致，`entries` 长度不超过 `limit`、`size >= min-size` 且 `is_dir == false`。
       - `--json` 模式下非法 `--min-size`、非法 `--threads`、不存在路径等错误场景，均保证进程非零退出、stdout 保持空白、错误信息仅输出到 stderr；非 `--json` 模式下非法 `--min-size` 行为与之保持一致。
   - remaining_todos:
-    - 当前开发环境无法从 crates.io 拉取依赖（`rayon` 等），`cargo test --workspace` 与 `cargo test --workspace --offline` 均因缺少远端索引/缓存而失败，后续需在具备网络或完整依赖缓存的 CI / 开发机上执行一次完整的 `cargo test --workspace` 以验证实现与这些集成测试。
+    - 本轮（Ralph iteration 8）在仓库根目录尝试执行：`cargo test -p surf-core --offline`、`cargo test -p surf-cli --offline` 以及 `cargo test -p surf-core`，均因无法从 `https://github.com/rust-lang/crates.io-index` 获取 `rayon` 依赖而失败；在线模式下多次重试时出现 `failed to connect to github.com: Connection timed out`，确认当前 Ralph 运行环境无可用 crates.io 网络访问或本地缓存。
+    - 受上述限制影响，`surf-core` 与 `surf-cli` 已经就绪的单元测试与端到端集成测试（包括 `workspaces/dev-core-scanner/surf-core/tests/basic_scan.rs` 与 `workspaces/dev-cli-tui/surf-cli/tests/integration.rs`）目前只能在具备网络或完整依赖缓存的 CI / 开发机上执行；建议在该类环境中运行 `cargo test --workspace` 或至少 `cargo test -p surf-core` / `cargo test -p surf-cli` 以完成对 CLI-ONEOFF-003 的自动化验收覆盖。
     - 在 CI 流水线中启用并稳定上述 `workspaces/dev-cli-tui/surf-cli/tests/integration.rs` 用例，作为回归保护，避免未来改动破坏 `--json` 模式下的 stdout/stderr 语义。
 
 ### 9.2 服务模式（示例）
