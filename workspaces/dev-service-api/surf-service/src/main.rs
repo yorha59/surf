@@ -55,6 +55,7 @@ const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const TASK_NOT_FOUND: i32 = -32001;
+const CONCURRENCY_LIMIT_EXCEEDED: i32 = -32003;
 
 /// 支持的 JSON-RPC 方法名称（来自 Architecture.md 4.3.*）
 const SUPPORTED_METHODS: [&str; 4] = [
@@ -344,6 +345,24 @@ impl TaskManager {
             })
             .map(|(id, info)| (id.clone(), info.clone()))
             .collect()
+    }
+
+    /// 统计当前处于 Running 状态且绑定了 scan_handle 的任务数量。
+    ///
+    /// 用于实现 max_concurrent_scans 并发控制。
+    fn count_running_tasks_with_handle(&self) -> usize {
+        let inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // 若互斥锁已中毒，则返回 0，避免因单个任务异常影响整个接口。
+                return 0;
+            }
+        };
+
+        inner
+            .values()
+            .filter(|info| info.state == TaskState::Running && info.scan_handle.is_some())
+            .count()
     }
 }
 
@@ -691,7 +710,7 @@ mod tests {
     #[test]
     fn test_invalid_json() {
         // 无效的 JSON 应该返回 INVALID_REQUEST 错误
-        let response = handle_rpc_line("{ invalid json }").unwrap();
+        let response = handle_rpc_line("{ invalid json }", 4, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_REQUEST);
@@ -703,7 +722,7 @@ mod tests {
     fn test_missing_jsonrpc_field() {
         // 缺少 jsonrpc 字段应该返回 INVALID_REQUEST
         let request = r#"{"method": "Surf.Scan", "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_REQUEST);
     }
@@ -712,7 +731,7 @@ mod tests {
     fn test_wrong_jsonrpc_version() {
         // jsonrpc 不是 "2.0" 应该返回 INVALID_REQUEST
         let request = r#"{"jsonrpc": "1.0", "method": "Surf.Scan", "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_REQUEST);
     }
@@ -721,7 +740,7 @@ mod tests {
     fn test_unknown_method() {
         // 未知方法应该返回 METHOD_NOT_FOUND
         let request = r#"{"jsonrpc": "2.0", "method": "Unknown.Method", "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
         assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
@@ -734,7 +753,7 @@ mod tests {
     fn test_supported_method_not_implemented() {
         // 支持的方法但未实现应该返回 METHOD_NOT_FOUND，并提示 "method not implemented yet"
         let request = r#"{"jsonrpc": "2.0", "method": "Surf.Scan", "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -745,7 +764,7 @@ mod tests {
     fn test_invalid_params_for_supported_method() {
         // 构造一个支持的方法（Surf.Scan），但 params 是数组（应为对象） -> INVALID_PARAMS
         let request = r#"{"jsonrpc": "2.0", "method": "Surf.Scan", "params": [], "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -761,7 +780,7 @@ mod tests {
     fn test_surf_scan_params_object_but_invalid_shape() {
         // params 是对象但缺少必填字段 path -> INVALID_PARAMS
         let request = r#"{"jsonrpc": "2.0", "method": "Surf.Scan", "params": {"threads": 4}, "id": 1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -775,7 +794,7 @@ mod tests {
     fn test_surf_scan_invalid_min_size_unit() {
         // min_size 单位非法 -> INVALID_PARAMS
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Scan","params":{"path":"/tmp","min_size":"10XB"},"id":1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -790,7 +809,7 @@ mod tests {
     fn test_surf_scan_invalid_threads_zero() {
         // threads 为 0 -> INVALID_PARAMS
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Scan","params":{"path":"/tmp","threads":0},"id":2}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -818,7 +837,7 @@ mod tests {
             "id": 42
         }"#;
 
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -850,9 +869,9 @@ mod tests {
     #[test]
     fn test_empty_line_skipped() {
         // 空行应该返回 None
-        let response = handle_rpc_line("");
+        let response = handle_rpc_line("", 4);
         assert!(response.is_none());
-        let response = handle_rpc_line("   ");
+        let response = handle_rpc_line("   ", 4);
         assert!(response.is_none());
     }
 
@@ -937,7 +956,7 @@ mod tests {
     fn test_surf_status_params_not_object_invalid_params() {
         // 构造请求：params 是数组而不是对象
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":[],"id":1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -951,7 +970,7 @@ mod tests {
     fn test_surf_status_missing_or_bad_task_id_invalid_params() {
         // 测试 task_id 是数字而不是 string/null
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":42},"id":3}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -960,7 +979,7 @@ mod tests {
 
         // 测试 task_id 是空字符串（视为无效参数）
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":""},"id":4}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -972,7 +991,7 @@ mod tests {
     fn test_surf_status_task_not_found_for_unknown_id() {
         // 请求一个不存在的 task_id 应返回 TASK_NOT_FOUND
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":"non-existent"},"id":3}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
@@ -999,7 +1018,7 @@ mod tests {
             task_id
         );
 
-        let response = handle_rpc_line(&request).unwrap();
+        let response = handle_rpc_line(&request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1057,7 +1076,7 @@ mod tests {
         );
 
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{},"id":10}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1108,7 +1127,7 @@ mod tests {
         );
 
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":null},"id":11}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1145,7 +1164,7 @@ mod tests {
         );
 
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","id":12}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1173,7 +1192,7 @@ mod tests {
     fn test_surf_cancel_params_not_object_invalid_params() {
         // 构造请求：params 是数组而不是对象
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":[],"id":1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -1187,7 +1206,7 @@ mod tests {
     fn test_surf_cancel_missing_or_bad_task_id_invalid_params() {
         // 缺少 task_id 字段
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{},"id":2}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -1196,7 +1215,7 @@ mod tests {
 
         // task_id 为数字而不是字符串
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":42},"id":3}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -1205,7 +1224,7 @@ mod tests {
 
         // task_id 为空字符串
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":""},"id":4}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -1217,7 +1236,7 @@ mod tests {
     fn test_surf_cancel_task_not_found_for_unknown_id() {
         // 合法的非空 task_id，目前一律视为不存在任务 -> TASK_NOT_FOUND
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":"non-existent"},"id":5}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
@@ -1244,7 +1263,7 @@ mod tests {
             task_id
         );
 
-        let response = handle_rpc_line(&request).unwrap();
+        let response = handle_rpc_line(&request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1262,7 +1281,7 @@ mod tests {
             "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.Status\",\"params\":{{\"task_id\":\"{}\"}},\"id\":7}}",
             task_id
         );
-        let status_response = handle_rpc_line(&status_request).unwrap();
+        let status_response = handle_rpc_line(&status_request, 4).unwrap();
         let status_parsed: serde_json::Value = serde_json::from_str(&status_response).unwrap();
         let status_result = status_parsed["result"].as_object().expect("status result should be an object");
         assert_eq!(status_result["state"], "canceled");
@@ -1285,7 +1304,7 @@ mod tests {
             task_id
         );
 
-        let response = handle_rpc_line(&request).unwrap();
+        let response = handle_rpc_line(&request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1350,7 +1369,7 @@ mod tests {
     fn test_surf_getresults_params_not_object_invalid_params() {
         // params 是数组而不是对象 -> INVALID_PARAMS
         let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":[],"id":1}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
@@ -1364,7 +1383,7 @@ mod tests {
     fn test_surf_getresults_unsupported_mode_invalid_params() {
         // 不支持的 mode 值应返回 INVALID_PARAMS
         let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":{"task_id":"t1","mode":"unknown"},"id":2}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -1376,7 +1395,7 @@ mod tests {
     fn test_surf_getresults_task_not_found() {
         // 合法参数但 task_id 不存在 -> TASK_NOT_FOUND
         let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":{"task_id":"non-existent"},"id":3}"#;
-        let response = handle_rpc_line(request).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
@@ -1402,7 +1421,7 @@ mod tests {
             "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.GetResults\",\"params\":{{\"task_id\":\"{}\"}},\"id\":4}}",
             task_id
         );
-        let response = handle_rpc_line(&request).unwrap();
+        let response = handle_rpc_line(&request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
@@ -1447,7 +1466,7 @@ mod tests {
             "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.GetResults\",\"params\":{{\"task_id\":\"{}\"}},\"id\":5}}",
             task_id
         );
-        let response = handle_rpc_line(&request).unwrap();
+        let response = handle_rpc_line(&request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
 
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -1486,7 +1505,7 @@ impl JsonRpcErrorResponse {
 }
 
 /// 解析一行 JSON-RPC 请求并生成相应的错误响应（如果请求无效或方法未实现）
-fn handle_rpc_line(line: &str) -> Option<String> {
+fn handle_rpc_line(line: &str, max_concurrent_scans: usize, 4) -> Option<String> {
     // 空行或仅空白则跳过
     if line.trim().is_empty() {
         return None;
@@ -1902,14 +1921,14 @@ struct Args {
 }
 
 /// 处理单个 TCP 连接，读取行分隔的 JSON-RPC 请求并返回错误响应
-async fn handle_connection(socket: tokio::net::TcpStream, peer: std::net::SocketAddr) -> anyhow::Result<()> {
+async fn handle_connection(socket: tokio::net::TcpStream, peer: std::net::SocketAddr, max_concurrent_scans: usize) -> anyhow::Result<()> {
     let (read_half, mut write_half) = socket.into_split();
     let reader = BufReader::new(read_half);
     let mut lines = reader.lines();
 
     while let Some(line) = lines.next_line().await? {
         // 使用 handle_rpc_line 处理每一行
-        if let Some(response) = handle_rpc_line(&line) {
+        if let Some(response) = handle_rpc_line(&line, max_concurrent_scans, 4) {
             // 记录请求摘要（方法名或错误类型）
             eprintln!("[{}] request line: {} -> response: {}", peer, line.trim(), response);
             write_half.write_all(response.as_bytes()).await?;
@@ -1942,13 +1961,14 @@ async fn main() -> anyhow::Result<()> {
         ttl = args.task_ttl_seconds,
     );
 
+    let max_concurrent_scans = args.max_concurrent_scans;
     loop {
         let (socket, peer) = listener.accept().await?;
         eprintln!("Accepted connection from {}", peer);
 
         // 为每个连接启动独立任务
         tokio::spawn(async move {
-            let _ = handle_connection(socket, peer).await;
+            let _ = handle_connection(socket, peer, max_concurrent_scans).await;
         });
     }
 }
