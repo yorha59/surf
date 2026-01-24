@@ -55,23 +55,31 @@ fn test_surf_json_output_with_min_size_and_limit() {
     // 5. 断言标准输出是合法 JSON
     let parsed: Value = serde_json::from_str(&stdout).expect("output is not valid JSON");
 
-    // 6. 断言 JSON 解析后是一个数组
-    let arr = parsed.as_array().expect("JSON root is not an array");
+    // 6. 断言 JSON 解析后是一个对象（对应新的 JsonOutput 结构）
+    let obj = parsed.as_object().expect("JSON root is not an object");
 
-    // 7. 断言数组长度不超过 `--limit` 指定的值（此处为 1）
-    assert!(arr.len() <= 1, "array length {} exceeds limit 1", arr.len());
+    // 7. 验证根路径字段
+    let root = obj.get("root").expect("missing 'root' field").as_str().expect("'root' is not a string");
+    assert!(root.starts_with(temp_path.to_str().unwrap()), "root {} is not under temp directory", root);
 
-    // 8. 对数组中每个条目，验证：
+    // 8. 验证条目数组字段
+    let entries = obj.get("entries").expect("missing 'entries' field").as_array().expect("'entries' is not an array");
+    assert!(entries.len() <= 1, "entries length {} exceeds limit 1", entries.len());
+
+    // 9. 对每个条目，验证：
     //    - 包含 `path` 和 `size` 字段
+    //    - 包含 `is_dir` 字段且为 false（当前扫描器仅返回文件）
     //    - size >= min_size (10)
     //    - 路径落在临时目录下
-    for entry in arr {
-        let obj = entry.as_object().expect("entry is not an object");
-        let path = obj.get("path").expect("missing 'path' field").as_str().expect("'path' is not a string");
-        let size = obj.get("size").expect("missing 'size' field").as_u64().expect("'size' is not a u64");
+    for entry in entries {
+        let entry_obj = entry.as_object().expect("entry is not an object");
+        let path = entry_obj.get("path").expect("missing 'path' field").as_str().expect("'path' is not a string");
+        let size = entry_obj.get("size").expect("missing 'size' field").as_u64().expect("'size' is not a u64");
+        let is_dir = entry_obj.get("is_dir").expect("missing 'is_dir' field").as_bool().expect("'is_dir' is not a boolean");
 
         assert!(size >= 10, "size {} is less than min-size 10", size);
         assert!(path.starts_with(temp_path.to_str().unwrap()), "path {} is not under temp directory", path);
+        assert!(!is_dir, "is_dir should be false for file entries");
     }
 
     // 可选：验证确实只返回了一个条目（因为 limit=1，且有两个符合条件的文件）

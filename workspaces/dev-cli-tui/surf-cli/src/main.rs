@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use surf_core::scan;
+use serde::Serialize;
 
 /// Surf CLI: disk usage scanner (minimal initial implementation).
 #[derive(Parser, Debug)]
@@ -51,6 +52,21 @@ struct Args {
     /// 对应 PRD 中的 `--host`，仅在 `--service` 模式下生效。
     #[arg(long = "host", default_value = "127.0.0.1")]
     host: String,
+}
+
+/// JSON 输出条目，对应 PRD 3.4 / 9.1.3 CLI-ONEOFF-003 的结构化输出要求。
+#[derive(Serialize)]
+struct JsonEntry {
+    path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+/// JSON 输出的根对象，包含扫描根路径和条目数组。
+#[derive(Serialize)]
+struct JsonOutput {
+    root: String,
+    entries: Vec<JsonEntry>,
 }
 
 fn parse_size(input: &str) -> Result<u64, String> {
@@ -128,11 +144,22 @@ For now, please use one-off mode with: surf --path <dir> [--threads] [--min-size
     if args.json {
         // JSON output: full list (respecting limit).
         let to_emit = &entries[..entries.len().min(args.limit)];
-        if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), to_emit) {
+        // 构建符合 PRD 3.4 / 9.1.3 要求的 JSON 输出结构
+        let json_output = JsonOutput {
+            root: args.path.display().to_string(),
+            entries: to_emit
+                .iter()
+                .map(|entry| JsonEntry {
+                    path: entry.path.display().to_string(),
+                    size: entry.size,
+                    is_dir: false, // 当前扫描器仅返回文件，目录条目暂不支持
+                })
+                .collect(),
+        };
+        if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), &json_output) {
             eprintln!("Failed to write JSON output: {}", e);
             std::process::exit(1);
         }
-        println!();
     } else {
         // Simple table output: size and path.
         println!("{:<12}  {}", "SIZE(BYTES)", "PATH");
