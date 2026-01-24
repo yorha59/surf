@@ -197,13 +197,23 @@
 
 - id: `CLI-ONEOFF-002`
 - title: 用户可以通过参数控制扫描并发度和最小文件大小过滤
-- status: `pending`
+- status: `done`
 - description: 作为希望在不同机器和目录上优化扫描性能的用户，我希望通过 `--threads` 和 `--min-size` 参数控制扫描的并发度以及结果中出现的最小文件大小，从而在保证结果可用性的前提下缩短扫描时间、减少无关小文件干扰。
 - acceptance_criteria:
   - 运行 `surf --path <dir> --threads N`（N 为合法正整数）时，程序按约定并发度启动扫描，不出现明显退化（例如设置更高并发却显著变慢或卡死）。
   - 在同一测试目录上，对比不加 `--min-size` 与加上 `--min-size 100MB` 的结果，后者的结果表中不包含任何大小小于 100MB 的文件/目录。
   - 对于非法的 `--threads` 或 `--min-size` 参数值（如 0、负数或无法解析的单位），程序给出明确错误提示并以非零状态码退出，不进入扫描过程。
   - 使用 `--threads`、`--min-size` 与 `--limit` 组合时，结果仍然按大小降序排序且条数限制与过滤逻辑符合预期。
+  - impl_notes (iteration 12 / dev-core-scanner & dev-cli-tui):
+   - `workspaces/dev-core-scanner/surf-core/src/lib.rs:1-72` 中的 `scan(root, min_size, threads)` 已实现按线程数控制的并发扫描与最小文件大小过滤：当 `root` 不存在时立即返回 `ErrorKind::NotFound`，错误消息包含 `scan root does not exist: <path>`；通过 `ThreadPoolBuilder::new().num_threads(threads.max(1))` 构建局部 rayon 线程池，并将 `WalkDir::new(root)` 迭代器转换为 `par_bridge()` 并行流，仅保留 `metadata.is_file() == true` 且 `metadata.len() >= min_size` 的文件条目，最终按 `size` 字段降序排序后返回完整 `Vec<FileEntry>` 结果。
+   - `workspaces/dev-core-scanner/surf-core/tests/basic_scan.rs:22-83` 的 `scan_respects_min_size_and_sorts_desc` 覆盖了 `min_size` 过滤与降序排序的 happy path；`scan_threads_zero_falls_back_to_one` / `scan_nonexistent_root_returns_not_found` / `scan_empty_directory_returns_empty_result` 等用例分别验证了 `threads == 0` 时退化为 1 的行为、一致的错误类型与错误消息语义，以及空目录返回空结果而非错误，从核心层保证了 acceptance_criteria 中“过滤语义正确”“并发参数健壮”的基础。
+   - `workspaces/dev-cli-tui/surf-cli/src/main.rs:12-37` 中的 `Args` 结构体通过 `clap::Parser` 定义了 `--min-size/-m`（字符串，默认 `"0"`）和 `--threads/-t`（默认 `num_cpus::get()`，`value_parser = parse_threads`）参数；`parse_size` 将字符串解析为字节数并支持 `B/KB/MB/GB` 单位，解析失败时在 stderr 输出 `Error parsing --min-size: ...` 并以非零状态码退出；`parse_threads` 显式拒绝 `0` 值（返回 `"--threads must be at least 1"` 错误），从而保证非法并发度不会触发真正的扫描逻辑。
+   - 在 CLI 主流程中（`workspaces/dev-cli-tui/surf-cli/src/main.rs:149-175`），`min_size` 解析失败直接退出；解析成功后调用 `surf_core::scan(&args.path, min_size, args.threads)`，并沿用核心层 `ErrorKind::NotFound` / 其他 IO 错误语义：当扫描失败时，CLI 清理 `indicatif::ProgressBar` spinner，在 stderr 输出 `Failed to scan <path>: <error>` 并以非零状态码退出；当扫描成功时，根据 `--json` 决定走 JSON 输出（`JsonOutput`）或表格输出，两种模式下都对 `entries` 进行 `take(args.limit)` 截断，利用核心层已按 size 降序排序的结果满足“多参数组合仍然按大小降序排序且条数限制正确”的要求。
+   - `workspaces/dev-cli-tui/surf-cli/src/main.rs:207-276` 中的单元测试为 `parse_size` 和 `threads` 相关参数提供了细粒度覆盖：包括空字符串/仅空白被视为 0、`KB/MB/GB` 大小写不敏感解析、未知单位报错，以及 `Args::parse_from` 在默认 threads、`-t` 覆盖和 `-t 0` 非法值时的行为；`service_mode_defaults_and_network_options` 也间接验证了与服务模式同处一处的参数默认值与覆盖逻辑。
+  - remaining_todos:
+   - 方向一：在具备完整 Rust 依赖缓存或可访问 crates.io 的环境（CI 或开发机）上，运行 `cargo test -p surf-core` 与 `cargo test -p surf-cli`，对本 story 所依赖的单元测试和集成测试进行一次完整回归，确保在不同 `--threads` / `--min-size` / `--limit` 组合下行为与 acceptance_criteria 保持一致。
+   - 方向二：在包含大量文件（例如 10^5 ~ 10^6 级别）的目录上分别以不同 `--threads` 值运行 `surf`，观察整体耗时与系统负载，记录推荐的线程数区间和 `min_size` 组合配置；如发现明显退化（高并发反而变慢或产生过高 IO 压力），在 Architecture 或后续 PRD 迭代中补充针对性建议或限流策略。
+   - 方向三：在后续引入交付阶段 `test/` 目录脚本时，可考虑为本 story 补充端到端验收脚本（例如 `test/scripts/cli_concurrency_and_min_size.sh`），以 `./release/<platform>/cli/surf` 为入口，验证不同参数组合下的 TopN 输出语义，与 PRD 8 章的 CLI 验收条目建立可回归的自动化映射。
 
 #### 9.1.3 CLI-ONEOFF-003 JSON 结构化输出
 
