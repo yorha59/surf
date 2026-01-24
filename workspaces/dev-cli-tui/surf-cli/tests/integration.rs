@@ -179,3 +179,89 @@ fn test_surf_non_json_error_behavior() {
         stderr
     );
 }
+
+/// 测试非 `--json` 表格模式下的基础成功路径：
+/// - 使用临时目录与不同大小文件；
+/// - 通过 `--path` / `--min-size` / `--limit` 触发扫描；
+/// - 验证表头存在且数据行数不超过 limit，stdout 不为空。
+#[test]
+fn test_surf_table_output_with_min_size_and_limit() {
+    let temp_dir = tempdir().expect("failed to create temp directory");
+    let temp_path = temp_dir.path();
+
+    // 创建若干文件：一个小文件（应被过滤掉），两个大文件（应被保留）。
+    let small_file = temp_path.join("small.txt");
+    File::create(&small_file)
+        .expect("failed to create small file")
+        .write_all(b"12345")
+        .expect("failed to write small file");
+
+    let medium_file = temp_path.join("medium.txt");
+    File::create(&medium_file)
+        .expect("failed to create medium file")
+        .write_all(&[b'x'; 20])
+        .expect("failed to write medium file");
+
+    let large_file = temp_path.join("large.txt");
+    File::create(&large_file)
+        .expect("failed to create large file")
+        .write_all(&[b'y'; 30])
+        .expect("failed to write large file");
+
+    // 不使用 --json，走表格输出路径。
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    cmd.args([
+        "--path",
+        temp_path.to_str().unwrap(),
+        "--min-size",
+        "10",
+        "--limit",
+        "2",
+    ]);
+
+    let output = cmd.output().expect("failed to execute surf");
+    assert!(
+        output.status.success(),
+        "surf exited with non-zero status: {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
+
+    // stdout 至少应包含两行表头（标题行 + 分隔行）。
+    let mut lines = stdout.lines();
+    let header_line = lines.next().expect("missing header line");
+    let separator_line = lines.next().expect("missing separator line");
+
+    assert!(
+        header_line.contains("SIZE") && header_line.contains("PATH"),
+        "header line does not contain expected columns: {}",
+        header_line
+    );
+    assert!(
+        separator_line.chars().any(|c| c == '-'),
+        "separator line does not look like a divider: {}",
+        separator_line
+    );
+
+    // 剩余的数据行数量不应超过 limit（这里为 2），且至少有一行数据。
+    let data_lines: Vec<&str> = lines.collect();
+    assert!(
+        !data_lines.is_empty(),
+        "expected at least one data line in table output"
+    );
+    assert!(
+        data_lines.len() <= 2,
+        "data lines length {} exceeds limit 2",
+        data_lines.len()
+    );
+
+    // 数据行中应至少包含临时目录路径片段，以确认扫描目标正确。
+    let temp_str = temp_path.to_str().unwrap();
+    assert!(
+        data_lines.iter().any(|line| line.contains(temp_str)),
+        "no data line contains temp directory path {}; lines: {:?}",
+        temp_str,
+        data_lines
+    );
+}
