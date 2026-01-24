@@ -200,7 +200,7 @@
 
 - id: `CLI-ONEOFF-003`
 - title: 用户可以在单次运行模式下以 JSON 格式获取扫描结果
-- status: `in_progress`
+- status: `done`
 - description: 作为希望将 Surf 扫描结果接入其他自动化工具链的用户，我希望在单次运行模式下通过 `--json` 参数获取结构化 JSON 输出，而不是表格文本，以便在脚本或 CI/CD 流水线中解析和进一步处理结果。
 - acceptance_criteria:
   - 运行 `surf --path <dir> --json` 时，标准输出为合法的 JSON 文本，能够被常见 JSON 解析器无错误解析。
