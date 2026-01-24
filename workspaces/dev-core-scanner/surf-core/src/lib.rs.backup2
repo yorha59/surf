@@ -173,46 +173,23 @@ impl ScanHandle {
         let join_handle = thread::spawn(move || {
             // 在线程池中执行扫描
             let scan_result = pool.install(|| {
-                // 直接实现扫描逻辑，以便在扫描过程中逐步更新进度
-                let root = config_clone.root.clone();
-                let min_size = config_clone.min_size;
-                
-                // 收集符合条件的文件条目
-                let entries: Vec<FileEntry> = WalkDir::new(&root)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .par_bridge()
-                    .filter_map(|entry| {
-                        let metadata = entry.metadata().ok()?;
-
-                        if !metadata.is_file() {
-                            return None;
-                        }
-
-                        let size = metadata.len();
-                        if size < min_size {
-                            return None;
-                        }
-
-                        // 更新进度：文件数+1，字节数+size
-                        {
-                            let mut progress = thread_state.progress.lock().unwrap();
-                            progress.scanned_files += 1;
-                            progress.scanned_bytes += size;
-                        }
-
-                        Some(FileEntry {
-                            path: entry.into_path(),
-                            size,
-                        })
-                    })
-                    .collect();
-                
-                // 按大小降序排序
-                let mut sorted_entries = entries;
-                sorted_entries.sort_by(|a, b| b.size.cmp(&a.size));
-                
-                Ok(sorted_entries)
+                // 这里可以调用现有的 scan 函数，但为了进度统计，我们重新实现一个简单版本
+                // 当前 MVP 版本：直接调用 scan，然后在完成后更新进度
+                match scan(&config_clone.root, config_clone.min_size, config_clone.threads) {
+                    Ok(entries) => {
+                        // 计算总文件数和总字节数
+                        let scanned_files = entries.len() as u64;
+                        let scanned_bytes = entries.iter().map(|e| e.size).sum();
+                        
+                        // 更新进度
+                        let mut progress = thread_state.progress.lock().unwrap();
+                        progress.scanned_files = scanned_files;
+                        progress.scanned_bytes = scanned_bytes;
+                        
+                        Ok(entries)
+                    }
+                    Err(e) => Err(e),
+                }
             });
 
             // 存储结果
