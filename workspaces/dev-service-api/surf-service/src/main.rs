@@ -45,7 +45,9 @@ struct AggregatedResult {
 /// - 针对 `Surf.Scan`：解析/校验参数（含 `min_size` 单位与 `threads` 下限），构造 `surf_core::ScanConfig` 并调用 `surf_core::start_scan` 启动实际扫描任务，将返回的 `ScanHandle` 保存到任务表中；
 /// - 针对 `Surf.Status`：支持查询单个任务或列出所有处于非终止态（queued/running）的任务，结合 `surf_core::poll_status` 返回实时进度信息，并在底层扫描结束后惰性推进任务状态（running → completed/failed）；
 /// - 针对 `Surf.Cancel`：校验 `task_id` 并通过 `TASK_MANAGER.cancel_task` 触发任务状态迁移及 `surf_core::cancel` 调用，实现幂等取消；
-/// - 针对 `Surf.GetResults`：实现了参数与任务状态校验，仅在任务处于 `completed` 状态时返回占位性的聚合结果结构（total_files/total_bytes 为 0，entries 为空数组），真实结果聚合与缓存仍在后续迭代中补充。
+/// - 针对 `Surf.GetResults`：按 Architecture.md 4.3.5 / 4.3.7 对参数与任务状态做校验，并在任务 `state = completed` 时通过
+///   `TaskManager::collect_results_if_needed` 调用 `surf_core::collect_results` 收集真实扫描结果、计算 `total_files`/`total_bytes`，
+///   以 CLI JSON 输出兼容的结构返回 TopN/summary 视图（当前仍为内存缓存，尚未持久化）。
 ///
 /// 参数结构体 `Args` 的 Clap 属性定义见文件靠后的 `struct Args`。
 /// JSON-RPC 2.0 标准错误码（部分）
@@ -532,11 +534,12 @@ struct SurfGetResultsResult {
     task_id: String,
     state: String,
     path: String,
-    /// 总文件数（占位，暂为 0）
+    /// 总文件数
     total_files: u64,
-    /// 总字节数（占位，暂为 0）
+    /// 总字节数（字节）
     total_bytes: u64,
-    /// 结果条目数组（占位，暂为空数组）
+    /// 结果条目数组；在 summary 模式下可以为空并被省略。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     entries: Vec<serde_json::Value>,
 }
 
@@ -1409,15 +1412,35 @@ mod tests {
     }
 
     #[test]
-    fn test_surf_getresults_completed_task_returns_placeholder_result() {
-        // 对于 Completed 状态的任务，应返回占位性的聚合结果结构
-        let task_id = TASK_MANAGER.register_task(
-            "/tmp/getresults-completed".to_string(),
+    fn test_surf_getresults_completed_task_returns_aggregated_result() {
+        use std::fs::{self, File};
+        use std::io::Write;
+
+        // 为测试创建一个临时目录并写入至少一个文件，确保 scan 有非空结果
+        let base = std::env::temp_dir().join("surf_getresults_completed");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let file_path = base.join("testfile.bin");
+        let mut f = File::create(&file_path).unwrap();
+        f.write_all(&vec![0u8; 1024]).unwrap();
+
+        // 启动核心扫描任务
+        let config = surf_core::ScanConfig {
+            root: base.clone(),
+            min_size: 0,
+            threads: 1,
+        };
+        let handle = surf_core::start_scan(config).unwrap();
+
+        // 注册一个 Completed 状态的任务，携带 scan_handle 和 limit
+        let task_id = TASK_MANAGER.register_task_with_handle(
+            base.to_string_lossy().to_string(),
             0,
             1,
-            None,
+            Some(10),
             Some("getresults-completed".to_string()),
             TaskState::Completed,
+            Some(handle),
         );
 
         let request = format!(
@@ -1434,11 +1457,20 @@ mod tests {
         let result = parsed["result"].as_object().expect("result should be an object");
         assert_eq!(result["task_id"].as_str().unwrap(), task_id);
         assert_eq!(result["state"].as_str().unwrap(), "completed");
-        assert_eq!(result["path"].as_str().unwrap(), "/tmp/getresults-completed");
-        assert_eq!(result["total_files"].as_u64().unwrap(), 0);
-        assert_eq!(result["total_bytes"].as_u64().unwrap(), 0);
+        assert_eq!(result["path"].as_str().unwrap(), base.to_string_lossy());
+
+        let total_files = result["total_files"].as_u64().unwrap();
+        let total_bytes = result["total_bytes"].as_u64().unwrap();
+        assert!(total_files >= 1);
+        assert!(total_bytes >= 1024);
+
+        // entries 至少包含一个条目，且字段完备
         let entries = result["entries"].as_array().expect("entries should be an array");
-        assert!(entries.is_empty());
+        assert!(!entries.is_empty());
+        let first = &entries[0];
+        assert!(first.get("path").is_some());
+        assert!(first.get("size").is_some());
+        assert!(first.get("is_dir").is_some());
     }
 }
 
@@ -1731,9 +1763,8 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                 }
             }
             "Surf.GetResults" => {
-                // 根据 Architecture.md 4.3.5，对 Surf.GetResults 进行参数与状态校验。
-                // 当前仅返回占位性的聚合结果（total_files/total_bytes 为 0，entries 为空），
-                // 真正的结果聚合与缓存将在后续迭代中实现。
+                // 根据 Architecture.md 4.3.5，对 Surf.GetResults 进行参数与状态校验，
+                // 并通过 TaskManager::collect_results_if_needed 接入真实聚合结果。
                 if req.params.is_null() || !req.params.is_object() {
                     let detail = format!(
                         "params must be a JSON object for method {}",
@@ -1748,7 +1779,7 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                             JsonRpcError::invalid_params(Some(detail))
                         }
                         Ok(get_params) => {
-                            // 仅支持 mode 缺省或 "flat"/"summary"，其他取值视为无效
+                            // 仅支持 mode 缺省或 "flat" / "summary"，其他取值视为无效
                             if let Some(ref mode) = get_params.mode {
                                 let mode_lc = mode.to_lowercase();
                                 if mode_lc != "flat" && mode_lc != "summary" {
@@ -1766,69 +1797,30 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                 }
                             }
 
-                            // 查询任务信息
-                            match TASK_MANAGER.get_task_info(&get_params.task_id) {
-                                None => {
-                                    let detail = format!(
-                                        "task_id not found: {}",
-                                        get_params.task_id
-                                    );
-                                    JsonRpcError::task_not_found(Some(detail))
-                                }
-                                Some(info) => {
-                                    // 仅在任务已处于 Completed 状态时返回结果；其他状态一律视为
-                                    // INVALID_PARAMS，与 Architecture.md 4.3.5 中的约定对齐。
-                                    if info.state != TaskState::Completed {
-                                        let state_str = match info.state {
-                                            TaskState::Queued => "queued",
-                                            TaskState::Running => "running",
-                                            TaskState::Completed => "completed",
-                                            TaskState::Failed => "failed",
-                                            TaskState::Canceled => "canceled",
-                                        };
-                                        let detail = format!(
-                                            "task is not in completed state (current: {})",
-                                            state_str
-                                        );
-                                        JsonRpcError::invalid_params(Some(detail))
-                                    } else {
-                                        // 当前版本尚未集成真实的聚合结果，仅返回占位数据：
-                                        // - total_files/total_bytes: 0
-                                        // - entries: 空数组
-                                        let result = SurfGetResultsResult {
-                                            task_id: get_params.task_id,
-                                            state: "completed".to_string(),
-                                            path: info.path,
-                                            total_files: 0,
-                                            total_bytes: 0,
-                                            entries: Vec::new(),
-                                        };
-                                        let success_response =
-                                            JsonRpcSuccessResponse::from_result(result, req.id);
-                                        return Some(
-                                            serde_json::to_string(&success_response)
-                                                .unwrap_or_else(|_| String::new()),
-                                        );
-                                    }
-                                }
-                            }
-                            // 使用新的结果收集方法
+                            // 使用 TaskManager 收集并缓存结果：
+                            // - 任务不存在 -> TASK_NOT_FOUND
+                            // - 任务非 completed 状态 -> INVALID_PARAMS
+                            // - 收集失败 -> INVALID_PARAMS（附带错误详情）
                             match TASK_MANAGER.collect_results_if_needed(&get_params.task_id) {
                                 Ok(collected) => {
                                     // 确定最终 limit：优先使用请求中的 limit，否则使用任务本身的 limit
                                     let effective_limit = get_params.limit.or(collected.limit);
 
-                                    // 根据 mode 构建响应
-                                    let mode =
-                                        get_params.mode.as_deref().unwrap_or("flat").to_lowercase();
-                                    let entries = if mode == "summary" {
-                                        // summary 模式：不返回 entries
+                                    // 根据 mode 构建 entries：summary 模式不返回 entries，
+                                    // flat 模式按 limit 进行截断。
+                                    let mode = get_params
+                                        .mode
+                                        .as_deref()
+                                        .unwrap_or("flat")
+                                        .to_lowercase();
+
+                                    let entries_vec: Vec<AggregatedEntry> = if mode == "summary" {
                                         Vec::new()
                                     } else {
-                                        // flat 模式：应用 limit 截断
                                         match effective_limit {
                                             Some(limit)
-                                                if limit < collected.aggregated_result.entries.len() =>
+                                                if limit
+                                                    < collected.aggregated_result.entries.len() =>
                                             {
                                                 collected.aggregated_result.entries[..limit].to_vec()
                                             }
@@ -1842,7 +1834,7 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                         path: collected.path,
                                         total_files: collected.aggregated_result.total_files,
                                         total_bytes: collected.aggregated_result.total_bytes,
-                                        entries: entries
+                                        entries: entries_vec
                                             .into_iter()
                                             .map(|entry| {
                                                 serde_json::to_value(entry)
@@ -1850,6 +1842,7 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                             })
                                             .collect(),
                                     };
+
                                     let success_response =
                                         JsonRpcSuccessResponse::from_result(result, req.id);
                                     return Some(
@@ -1858,7 +1851,6 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     );
                                 }
                                 Err(err) => {
-                                    // 错误已经由 collect_results_if_needed 构造好
                                     let response = JsonRpcErrorResponse::from_error(err, req.id);
                                     return Some(
                                         serde_json::to_string(&response)
