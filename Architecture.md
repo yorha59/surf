@@ -48,13 +48,14 @@
 
 ### 4.1 核心扫描引擎 (Scanner Engine)
 - **模块职责**：
-  - 并发扫描本地磁盘文件系统（当前形态为**一次性同步扫描**）
+  - 并发扫描本地磁盘文件系统（当前已实现形态为**一次性同步扫描**）
   - 收集文件层面的元数据（至少包含：路径、大小），并按大小降序排序
   - 按最小文件大小阈值进行过滤，屏蔽小于 `min_size` 的文件
   - 处理不存在路径、权限不足等基础错误场景，并以 `std::io::Error` 形式反馈给上层
 - **模块边界**：
   - 负责：文件系统遍历、文件元数据获取与过滤、结果排序
   - 不负责：结果展示、JSON/表格序列化、任务生命周期管理与持久化存储
+  - 关于**进度上报**：核心层负责维护扫描过程中的计数器并提供**只读快照 API**，但不直接管理任务 ID 或 JSON-RPC 语义（这些由服务层/CLI 在上层完成，见 4.3.7 与 5.1/5.2）。
 - **依赖哪些模块**：
   - 标准库：`std::fs`, `std::path`, `std::io`
   - 第三方：`walkdir` 用于递归遍历目录树，`rayon` 用于并行扫描
@@ -75,7 +76,7 @@
       - `size`：文件大小（单位：字节），直接来自底层 `metadata.len()`。
       - 该结构体实现 `Clone` 和 `serde::Serialize`，便于上层进行排序重用和直接序列化。
 
-  - 核心扫描函数签名与行为：
+  - 核心扫描函数签名与行为（**当前已实现**）：
 
     ```rust
     pub fn scan(root: &Path, min_size: u64, threads: usize) -> std::io::Result<Vec<FileEntry>>
@@ -140,22 +141,67 @@
       - 可在聚合层/服务层中额外扩展 `file_type`、`modified_at` 等字段，但这些字段应从更完整的核心结果或聚合结构中推导，而不是在各前端（CLI/GUI）中各自发明。
 
 - **与上层模块的契约（CLI 单次运行 & 服务层任务管理）**：
-  - CLI 单次运行模式（One-off）调用约定：
-    - CLI 以同步方式调用 `scan(&path, min_size_bytes, threads)`，等待结果返回：
-      - 成功时，根据 `--json` 决定走 JsonOutput 序列化或表格打印路径；
-      - 失败时，进度指示器由 CLI 层负责清理，错误文案基于 `std::io::Error` 直接渲染到 stderr，并以非零状态码退出，不输出部分结果。
-    - 进度条与日志完全在 CLI 层实现，核心扫描引擎不承担进度上报职责（未来如需支持更细粒度进度，可在不破坏现有同步接口的前提下增加额外 API，**未来迭代可调整**）。
-  - 服务层任务管理（ScanHandle / StatusSnapshot / AggregatedResult）的预期集成方式：
-    - 当前 `surf-service` 仅实现 JSON-RPC 协议骨架，尚未真正调用 `surf-core`；
-    - 设计上，服务层应基于本节定义的同步扫描 API，演进出如下抽象（见 4.3.7）：
-      - `start_scan(path, min_size, threads) -> ScanHandle`
-      - `poll_status(handle) -> StatusSnapshot`
-      - `collect_results(handle) -> AggregatedResult`
-      - `cancel(handle)`
-    - 在最小实现阶段，可以简单地在后端任务线程中调用一次 `scan(...)` 并将返回的 `Vec<FileEntry>` 交给数据聚合层构造 `AggregatedResult`，再由服务层缓存并通过 `Surf.GetResults` 返回：
-      - `AggregatedResult.entries` 中的每个元素与 CLI `JsonEntry` 保持字段/语义对齐；
-      - `StatusSnapshot` 中的 `scanned_files` / `scanned_bytes` 等字段从扫描过程中维护的计数器中获得，与最终结果总数保持一致。
-    - 以上 `ScanHandle` / `StatusSnapshot` / `AggregatedResult` 仅作为面向服务层的抽象契约，具体结构体名称与字段可在后续迭代中细化或调整，但需要继续以 `FileEntry` 及其聚合视图为统一数据源（**未来迭代可调整**）。
+  - CLI 单次运行模式（One-off）调用约定（区分“当前实现”与“进度感知目标形态”）：
+    - **当前已实现路径（iteration ≤ 14）**：
+      - CLI 以同步方式调用 `scan(&path, min_size_bytes, threads)`，等待结果返回：
+        - 成功时，根据 `--json` 决定走 JsonOutput 序列化或表格打印路径；
+        - 失败时，进度指示器由 CLI 层负责清理，错误文案基于 `std::io::Error` 直接渲染到 stderr，并以非零状态码退出，不输出部分结果。
+      - 进度指示器当前仅为简单的 spinner（`"Scanning <path> ..."`），**尚未展示已扫描文件数与已扫描总大小**，即仍然未满足 PRD 9.1.1 中对进度条内容的完整要求。
+    - **进度感知目标形态（本节新增架构设计，尚未在代码中落地）**：
+      - 在保持 `scan(...)` 作为向后兼容同步 API 的前提下，核心层提供一组额外的进度感知抽象，供 CLI 与服务层复用：
+
+        ```rust
+        pub struct ScanConfig {
+            pub root: PathBuf,
+            pub min_size: u64,
+            pub threads: usize,
+        }
+
+        pub struct ScanProgress {
+            pub scanned_files: u64,
+            pub scanned_bytes: u64,
+            pub total_bytes_estimate: Option<u64>,
+        }
+
+        pub struct StatusSnapshot {
+            /// 仅反映底层扫描是否已经自然结束；
+            /// 任务级状态（queued/running/completed/failed/canceled）仍由服务层维护。
+            pub done: bool,
+            pub progress: ScanProgress,
+            /// 若底层扫描因 IO 等原因失败，这里给出摘要信息（例如 `ErrorKind` + 文本描述），
+            /// 供服务层映射为 JSON-RPC 错误码；具体结构在实现时可细化。
+            pub error: Option<String>,
+        }
+
+        pub struct ScanHandle { /* opaque, Send + Sync */ }
+
+        pub fn start_scan(config: ScanConfig) -> std::io::Result<ScanHandle>;
+        pub fn poll_status(handle: &ScanHandle) -> StatusSnapshot;
+        pub fn collect_results(handle: ScanHandle) -> std::io::Result<Vec<FileEntry>>;
+        pub fn cancel(handle: &ScanHandle);
+        ```
+
+      - CLI 单次运行模式在目标形态下的调用方式：
+        - 将原来的 `scan(&path, ...)` 替换为：
+          1. 构造 `ScanConfig { root: path.clone(), min_size, threads }`；
+          2. 调用 `start_scan(config)` 获取 `ScanHandle`；
+          3. 在前台循环调用 `poll_status(&handle)`（例如每 100–200ms 一次），使用 `StatusSnapshot.progress.scanned_files` / `scanned_bytes` / `total_bytes_estimate` 更新 `indicatif` 进度条文本；
+          4. 当 `StatusSnapshot.done == true` 时退出循环，调用 `collect_results(handle)` 获取最终 `Vec<FileEntry>`，后续流程与当前实现保持一致（表格或 JSON 输出，`--limit` 截断等）。
+        - 进度条与日志继续全部输出到 stderr，stdout 仅在扫描成功结束后输出一次性结果；在 `--json` 模式下同样复用该约定，避免干扰 JSON 消费方（与 PRD 9.3 中的设计决策保持一致）。
+        - 对于 Ctrl+C 中断场景，CLI 通过调用 `cancel(&handle)` 请求核心层尽快停止扫描，然后清理进度条并以非零状态码退出，仍然不输出部分结果。
+
+  - 服务层任务管理（`ScanHandle` / `StatusSnapshot` / `AggregatedResult`）的预期集成方式（与 4.3.7 对齐）：
+    - 当前 `surf-service` 仅实现 JSON-RPC 协议骨架，尚未真正调用 `surf-core`；本节的 `ScanHandle` 等抽象为**服务层与核心层之间的统一契约**，供后续迭代落地。
+    - 服务层在创建扫描任务时，通过 `start_scan(ScanConfig)` 获取 `ScanHandle` 并存入任务表；在后台调度协程中周期性调用 `poll_status(&handle)`，把得到的 `StatusSnapshot`：
+      - `StatusSnapshot.progress.scanned_files` 映射为 `Surf.Status.result.scanned_files`；
+      - `StatusSnapshot.progress.scanned_bytes` 映射为 `Surf.Status.result.scanned_bytes`；
+      - `StatusSnapshot.progress.total_bytes_estimate` 映射为 `Surf.Status.result.total_bytes_estimate`（若为 `None`，JSON 字段为 `null`）；
+      - `StatusSnapshot.done` 结合服务层自己的任务状态机，共同决定 `Surf.Status.result.state` 从 `running` 迁移到 `completed`/`failed`；
+      - `StatusSnapshot.error` 由服务层翻译为 JSON-RPC 错误码（如 `INTERNAL_ERROR` 或 `PERMISSION_DENIED`），并记入 `error.data.detail`。
+    - 在扫描结束后，服务层调用 `collect_results(handle)` 获取完整 `Vec<FileEntry>`，再委托数据聚合层构造 `AggregatedResult` 并挂载到任务上，供 `Surf.GetResults` 使用；`AggregatedResult.entries` 与 CLI `JsonEntry` 保持字段/语义对齐。
+    - 对于取消场景，服务层调用 `cancel(&handle)` 尝试中断底层遍历，同时将任务状态迁移为 `canceled`；无论底层是否能立即终止，后续 `Surf.Status` / `Surf.GetResults` 均以服务层状态机为主，核心层仅提供尽力而为的取消信号。
+
+> 以上进度感知 API（`ScanConfig` / `ScanProgress` / `StatusSnapshot` / `ScanHandle` 及其方法）为本次迭代新增的**架构级设计**，尚未在 `surf-core` 代码中实现；当前实现仍然只提供同步的 `scan(...)` 函数。下一轮由 `dev-core-scanner`、`dev-service-api` 与 `dev-cli-tui` 协同落地该抽象，以满足 PRD 9.1.1 与 9.2 中关于 `progress` / `scanned_files` / `scanned_bytes` 的验收要求。
 
 ### 4.2 数据聚合层 (Data Aggregator)
 - **模块职责**：
@@ -505,14 +551,53 @@
   - 短期内不引入复杂认证机制；若监听非本地地址，建议结合系统防火墙或反向代理进行访问控制。
   - 对传入的 `path` 做最小合法性校验：禁止明显不合法的路径字符串，避免路径注入类问题。
   - 不提供删除/修改文件的 JSON-RPC 方法，保持服务层只读；删除能力仅在 CLI/TUI/GUI 中通过本地操作提供。
-- **与 `surf-core` 的交互边界**：
-  - 服务层对每个任务维护一个 `ScanHandle`（实现细节由 `dev-core-scanner` 提供）：
-    - `start_scan(path, min_size, threads) -> ScanHandle`
-    - `poll_status(handle) -> StatusSnapshot`
-    - `collect_results(handle) -> AggregatedResult`
-    - `cancel(handle)`
-  - 服务层不直接操作文件系统，只通过上述 API 与扫描引擎交互。
-  - 状态轮询与结果收集由服务层的后台任务（例如基于 `tokio::spawn`）完成，前端 JSON-RPC 请求只读取最新快照，避免阻塞网络线程。
+- **与 `surf-core` 的交互边界（进度感知集成）**：
+  - 服务层对每个任务维护一个 `ScanHandle`（结构与方法见 4.1 中的进度感知 API 设计，由 `dev-core-scanner` 提供具体实现）：
+    - `start_scan(config: ScanConfig) -> ScanHandle`
+    - `poll_status(handle: &ScanHandle) -> StatusSnapshot`
+    - `collect_results(handle: ScanHandle) -> Vec<FileEntry>`（或在内部先交由数据聚合层转换为 `AggregatedResult` 再缓存）。
+    - `cancel(handle: &ScanHandle)`
+  - 服务层不直接操作文件系统，只通过上述 API 与扫描引擎交互；任务 ID (`task_id`) 与任务状态机（`queued` / `running` / `completed` / `failed` / `canceled`）由服务层维护，并与底层 `ScanHandle` 的生命周期关联：
+    - 创建任务时：
+      - 解析 JSON-RPC `Surf.Scan` 参数构造 `ScanConfig`；
+      - 调用 `start_scan(config)` 成功后生成 `task_id`，并将 `(task_id, ScanHandle, 任务元数据)` 存入任务表，任务状态置为 `running` 或 `queued`（视并发策略而定）。
+    - 周期性进度刷新：
+      - 后台协程基于 `tokio::spawn` 周期性遍历 `running` 状态任务，调用 `poll_status(&handle)`：
+        - 将 `StatusSnapshot.progress.scanned_files` 映射为任务内部的 `scanned_files` 计数，并同步到 JSON-RPC `Surf.Status` 的 `result.scanned_files` 字段；
+        - 将 `StatusSnapshot.progress.scanned_bytes` 映射为任务内部的 `scanned_bytes` 计数，并同步到 `Surf.Status.result.scanned_bytes`；
+        - 将 `StatusSnapshot.progress.total_bytes_estimate`（若为 `Some`）同步到 `Surf.Status.result.total_bytes_estimate`，否则在 JSON 中以 `null` 表示；
+        - 由服务层根据 `scanned_bytes` 与 `total_bytes_estimate` 计算 `progress` 浮点值：
+
+          ```text
+          progress =
+            if total_bytes_estimate.is_some() && total_bytes_estimate > 0 {
+                scanned_bytes as f64 / total_bytes_estimate as f64
+            } else {
+                null        # 无法估算时，JSON 中可用 null 表示
+            }
+          ```
+
+        - 当 `StatusSnapshot.done == true` 且 `StatusSnapshot.error.is_none()` 时，任务状态从 `running` 迁移为 `completed`；若 `error.is_some()`，则迁移为 `failed`，并在任务元数据中记录错误摘要。
+        - 无论成功或失败，`Surf.Status.result.state` 字段均以服务层任务状态机的值为准，核心层仅通过 `done` / `error` 提供底层信号。
+    - 结果收集：
+      - 在任务状态进入 `completed`（或 `failed` 但仍需保留部分结果）后，服务层调用 `collect_results(handle)` 获取最终 `Vec<FileEntry>`，并委托数据聚合层生成 `AggregatedResult`：
+        - `AggregatedResult.entries` 字段中的每个元素在概念上应与 CLI `JsonEntry` 对齐，至少包含 `path` / `size` / `is_dir` 等字段；
+        - 聚合层可追加 `file_type`、`modified_at` 等派生信息，但不得更改核心字段含义。
+      - `Surf.GetResults` 直接基于 `AggregatedResult` 序列化响应。
+    - 取消与回收：
+      - 当接收到 `Surf.Cancel` 请求且任务处于 `queued` 或 `running` 时，服务层调用 `cancel(&handle)` 向核心层发出中断信号，并将任务状态设置为 `canceled`（或在安全点完成迁移）；
+      - 任务进入终止态后（`completed` / `failed` / `canceled`），在 `task_ttl_seconds` 内保留其 `StatusSnapshot` 与聚合结果，供后续 `Surf.Status` / `Surf.GetResults` 查询；TTL 到期后，从任务表中删除对应 `ScanHandle` 与缓存结果。
+  - JSON-RPC `Surf.Status` 字段与内部快照/状态的对应关系（总结）：
+    - `task_id`：来自服务层任务表主键；
+    - `state`：来自服务层任务状态机（结合 `StatusSnapshot.done` / `error` 更新）；
+    - `progress`：由服务层基于 `scanned_bytes` / `total_bytes_estimate` 估算，无法估算时可设为 `null` 或省略；
+    - `scanned_files`：来自最近一次 `StatusSnapshot.progress.scanned_files`；
+    - `scanned_bytes`：来自最近一次 `StatusSnapshot.progress.scanned_bytes`；
+    - `total_bytes_estimate`：来自最近一次 `StatusSnapshot.progress.total_bytes_estimate`；
+    - `started_at` / `updated_at`：由服务层在任务创建与每次轮询时维护，与核心层解耦；
+    - `tag`：来自 `Surf.Scan` 请求参数，存放于任务元数据，不由核心层关心。
+
+> 本节对 `Surf.Status` 中 `progress` / `scanned_files` / `scanned_bytes` / `total_bytes_estimate` 的来源和计算方式给出了明确映射关系。后续由 `dev-service-api` 在实现 JSON-RPC 方法时严格遵循本约定，确保服务模式与 CLI/TUI 共同复用 `surf-core` 的进度快照能力，而不是各自重复统计逻辑。
 
 ### 4.4 命令行界面 (CLI/TUI)
 - **模块职责**：
@@ -571,22 +656,51 @@
 ## 5. 核心数据流
 
 ### 5.1 单次运行模式数据流
-1. 用户执行 `surf --path /path/to/scan --min-size 100MB`
-2. CLI 模块解析参数，调用核心扫描引擎的 `scan()` 方法
-3. 核心扫描引擎在内部启动并发扫描并一次性返回完整结果；当前版本不对外报告实时进度，进度条完全由 CLI 层基于 Architecture 4.4 中的约定自行管理（未来如需更细粒度进度，可在不破坏现有同步接口的前提下新增进度 API）。
-4. 扫描完成后，数据聚合层汇总和排序结果（当前 MVP 中，大部分 TopN 与排序逻辑仍由 `surf-core::scan` 内部完成，数据聚合层后续迭代逐步承接更多责任）。
-5. CLI 模块以表格形式展示结果或根据 `--json` 输出结构化 JSON。
+1. 用户执行 `surf --path /path/to/scan --min-size 100MB`。
+2. CLI 模块解析参数，根据当前实现或目标形态选择不同的数据流：
+   - **当前实现（无进度快照，仅 spinner）**：
+     1. 直接调用核心扫描引擎的同步函数 `scan(&path, min_size_bytes, threads)`；
+     2. 在等待结果期间，仅在 stderr 上展示 `indicatif::ProgressBar::new_spinner` 形式的“`Scanning <path> ...`”提示；
+     3. 扫描完成或出错后关闭 spinner，进入结果展示或错误处理流程。
+   - **目标形态（复用核心层进度快照，满足 PRD 9.1.1）**：
+     1. CLI 构造 `ScanConfig { root, min_size, threads }` 并调用 `start_scan(config)` 获取 `ScanHandle`（见 4.1）；
+     2. 在前台循环调用 `poll_status(&handle)`，根据返回的 `StatusSnapshot.progress.scanned_files` / `scanned_bytes` / `total_bytes_estimate` 更新 stderr 上的进度条文案，例如：
+
+        ```text
+        Scanned {scanned_files} files, {human_readable(scanned_bytes)} read...
+        ```
+
+     3. 当 `StatusSnapshot.done == true` 时退出轮询，调用 `collect_results(handle)` 获取最终 `Vec<FileEntry>` 供后续展示使用；
+     4. 对于 Ctrl+C 中断场景，CLI 通过 `cancel(&handle)` 请求核心层终止扫描，并在 stderr 提示“用户中断”，以 130 等非零退出码结束进程，无论表格还是 JSON 模式均不输出部分结果。
+3. 扫描完成后，数据聚合层汇总和排序结果（当前 MVP 中，大部分 TopN 与排序逻辑仍由 `surf-core::scan` 内部完成，数据聚合层后续迭代逐步承接更多责任）。
+4. CLI 模块以表格形式展示结果或根据 `--json` 输出结构化 JSON，保持如下 stdout/stderr 语义：
+   - 进度条与日志统一输出到 stderr；
+   - 表格或 JSON 结果仅在扫描成功完成后一次性输出到 stdout；
+   - 错误场景（参数错误、IO 错误、中断）只在 stderr 输出文案，stdout 保持空白。
 
 ### 5.2 服务模式数据流
 1. 用户执行 `surf --service --port 1234`（或独立的 `surf-service` 可执行文件）启动服务层，监听 `127.0.0.1:1234`。
-2. 客户端（CLI/GUI 或其他应用）通过 JSON-RPC 调用 `Surf.Scan` 方法，创建新的扫描任务并获得 `task_id`。
-3. 服务层根据当前并发情况将任务置为 `running` 或 `queued`，并通过 `surf-core` 启动或排队实际扫描逻辑。
+2. 客户端（CLI/GUI 或其他应用）通过 JSON-RPC 调用 `Surf.Scan` 方法，创建新的扫描任务并获得 `task_id`：
+   - 服务层解析请求参数，构造 `ScanConfig`；
+   - 调用 `start_scan(config)` 获取 `ScanHandle`；
+   - 在内存任务表中登记 `(task_id, ScanHandle, 任务状态及元数据)`，状态初始为 `running` 或 `queued`（取决于 `max_concurrent_scans` 策略）。
+3. 服务层根据当前并发情况调度任务：
+   - 当任务真正启动或从排队转为运行时，对应的 `ScanHandle` 被传入后台 worker 协程；
+   - worker 在生命周期内周期性调用 `poll_status(&handle)`，更新任务内部的 `scanned_files` / `scanned_bytes` / `total_bytes_estimate` 等字段，并驱动任务状态从 `running` 向 `completed` / `failed` 演进（见 4.3.7）。
 4. 扫描进行中，客户端周期性调用 `Surf.Status`：
    - 传入 `task_id` 获取单一任务的进度；
-   - 或传入 `null` 获取所有活跃任务的列表，用于任务面板展示。
-5. 若用户在 GUI/CLI 中选择取消某个任务，客户端调用 `Surf.Cancel`，服务层请求 `surf-core` 中断扫描并将任务标记为 `canceled`。
-6. 扫描完成或进入终止态后，客户端通过 `Surf.GetResults` 获取结果摘要或 TopN 列表，驱动表格/可视化展示。
-7. 客户端在完成展示与必要的交互后，可以不再访问该 `task_id`；服务层在 TTL 到期后自动回收该任务的内存与内部句柄。
+   - 或传入 `null` 获取所有活跃任务的列表，用于任务面板展示；
+   - 服务层在处理 `Surf.Status` 时，从任务表中读取最近一次 `StatusSnapshot` 的聚合结果并映射到 JSON 响应：
+     - `scanned_files` / `scanned_bytes` / `total_bytes_estimate` 分别对应内部计数；
+     - `progress` 由服务层基于 `scanned_bytes` 与 `total_bytes_estimate` 估算；
+     - `state` 则完全来自服务层任务状态机（`queued` / `running` / `completed` / `failed` / `canceled`）。
+5. 若用户在 GUI/CLI 中选择取消某个任务，客户端调用 `Surf.Cancel`，服务层查找任务并：
+   - 调用 `cancel(&handle)` 请求 `surf-core` 尽快中断扫描；
+   - 将任务状态迁移为 `canceled`（或在安全点迁移），后续 `Surf.Status` 反映终止态，`Surf.GetResults` 视实现选择是否返回部分结果或仅返回失败摘要（当前设计倾向于不返回 partial TopN，见 4.3.5 与 6.2）。
+6. 扫描完成或进入终止态后，客户端通过 `Surf.GetResults` 获取结果摘要或 TopN 列表，驱动表格/可视化展示：
+   - 服务层在任务结束时调用 `collect_results(handle)` 获取 `Vec<FileEntry>`，并通过数据聚合层构造 `AggregatedResult` 缓存于任务结构中；
+   - `Surf.GetResults` 基于缓存的 `AggregatedResult` 序列化响应，而不再访问核心层。
+7. 客户端在完成展示与必要的交互后，可以不再访问该 `task_id`；服务层在 TTL 到期后自动回收该任务的内存与内部 `ScanHandle`/结果缓存，后续再访问同一 `task_id` 会返回 `TASK_NOT_FOUND (-32001)` 错误。
 
 ### 5.3 GUI 模式数据流
 1. 用户打开 Surf.app，配置扫描参数
