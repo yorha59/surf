@@ -134,6 +134,17 @@ fi
 
 if [[ ! -s "${RESP_FILE}" ]]; then
   log "ERROR: empty response for invalid params request"
+  # provide short snippets from service logs to aid debugging
+  if [[ -s "${OUT_SERVER_STDERR}" ]]; then
+    log "server stderr (first 200 bytes):"
+    head -c 200 "${OUT_SERVER_STDERR}" | sed 's/^/[service_jsonrpc_invalid_params] /'
+    echo
+  fi
+  if [[ -s "${OUT_SERVER_STDOUT}" ]]; then
+    log "server stdout (first 200 bytes):"
+    head -c 200 "${OUT_SERVER_STDOUT}" | sed 's/^/[service_jsonrpc_invalid_params] /'
+    echo
+  fi
   fail 1
 fi
 
@@ -175,4 +186,3 @@ fi
 
 log "INVALID_PARAMS error path validated"
 pass
-
