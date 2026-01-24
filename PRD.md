@@ -293,14 +293,14 @@
     - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 绑定本地 TCP 监听”“基于行分隔的 JSON-RPC 2.0 请求解析与错误响应骨架”“最小可用的内存任务表（`TaskManager` + `TaskInfo`）”以及围绕 `Surf.Scan`/`Surf.Status`/`Surf.Cancel` 的参数校验与成功/失败单元测试，但仍然只是一个“更完整的 JSON-RPC 服务骨架”，距离可用服务还有明显差距：
       - `Surf.Scan` 目前只负责在内存中登记任务元数据并返回 `queued` 状态的 `task_id`，尚未真正调用 `workspaces/dev-core-scanner/surf-core` 启动扫描；
       - `Surf.Status` 能够根据 `task_id` 查询内存任务表并返回占位进度信息，但尚未接入核心进度快照（`scanned_files` / `scanned_bytes` / `total_bytes_estimate` 等字段均为固定值）；
-      - `Surf.Cancel` 尚未真正更新任务状态或触发底层取消，仅在参数合法时对未知任务返回 `TASK_NOT_FOUND`；
+      - `Surf.Cancel` 已基于全局 `TASK_MANAGER.cancel_task(task_id)` 实现幂等的任务状态迁移（包括从 `queued`/`running` 迁移到 `canceled`，以及对终止态任务的重复取消），但仍未真正触发底层扫描的取消，仅在内存任务表中更新状态；
       - `Surf.GetResults` 仍然仅在错误模型中占位，任何调用都会收到 `METHOD_NOT_FOUND` 类型的错误响应；
-      - 尚未引入真实的任务状态机迁移、并发控制、任务 TTL 回收策略或与 `workspaces/dev-core-scanner/surf-core` 的扫描/结果集成，也未实现优雅关闭逻辑，因此**当前服务二进制仍不满足本 story 的验收标准**。
+      - 尚未引入真实的任务状态机迁移与 `surf-core` 进度/结果之间的映射、基于 `max_concurrent_scans` 的并发控制、基于 `task_ttl_seconds` 的任务 TTL 回收策略，亦未实现优雅关闭逻辑，因此**当前服务二进制仍不满足本 story 的验收标准**。
   - remaining_todos:
     - 方向一：任务管理与并发控制（围绕 `max_concurrent_scans` / `task_ttl_seconds` 等参数落地）
-      - 在服务进程内引入最小可用的任务管理器：为每个扫描请求分配唯一 `task_id`，维护任务状态（如 Pending / Running / Completed / Failed / Canceled）及必要的元数据/结果引用；
+      - 在现有 `TaskManager` 基础上，真正引入“运行中任务队列”和与 `Surf.Scan`/`Surf.Status`/`Surf.Cancel` 一致的任务状态机，将当前仅用于元数据记录的任务表演进为可限制并发与回收终止态任务的调度器；
       - 基于 `--max-concurrent-scans` 限制同时运行的扫描任务数量，对超出并发上限的请求给出明确的错误或排队语义；
-      - 基于 `--task-ttl-seconds` 为完成/失败任务实现 TTL 回收策略，避免长期堆积在内存中；
+      - 基于 `--task-ttl-seconds` 为完成/失败/取消的任务实现 TTL 回收策略，避免长期堆积在内存中；
       - 在任务状态管理和并发控制上补充必要的日志与错误码，以便在高并发场景下排查问题。
     - 方向二：与 `surf-core` 的扫描 API 集成
       - 将 JSON-RPC 中的 `Surf.Scan` 映射为对 `workspaces/dev-core-scanner/surf-core` 的一次扫描调用，负责构造输入参数并启动实际扫描任务；
