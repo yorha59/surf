@@ -200,13 +200,19 @@
 
 - id: `CLI-ONEOFF-003`
 - title: 用户可以在单次运行模式下以 JSON 格式获取扫描结果
-- status: `pending`
+- status: `in_progress`
 - description: 作为希望将 Surf 扫描结果接入其他自动化工具链的用户，我希望在单次运行模式下通过 `--json` 参数获取结构化 JSON 输出，而不是表格文本，以便在脚本或 CI/CD 流水线中解析和进一步处理结果。
 - acceptance_criteria:
   - 运行 `surf --path <dir> --json` 时，标准输出为合法的 JSON 文本，能够被常见 JSON 解析器无错误解析。
   - JSON 输出中至少包含：被扫描根路径、每个结果条目的完整路径、大小（带单位或统一单位字段）、文件类型或目录标识，以及与 `--limit`、`--min-size` 等参数一致的过滤/截断结果。
   - 在 `--json` 模式下，程序的退出码语义与表格模式保持一致：正常完成为 0，参数错误或严重异常为非零。
   - 对于错误参数组合（例如不支持的标志），仍然打印清晰错误信息到标准错误输出，并避免输出部分或不完整的 JSON 结构。
+  - impl_notes (iteration 2 / dev-cli-tui):
+    - `workspaces/dev-cli-tui/surf-cli/src/main.rs:59` 定义了 `JsonEntry`/`JsonOutput` 结构，当前 JSON 根对象包含 `root` 与 `entries` 数组，条目字段为 `path`、`size`、`is_dir`（扫描器目前仅返回文件，目录条目暂不支持）。
+    - `workspaces/dev-cli-tui/surf-cli/tests/integration.rs:9` 覆盖了 `--path <temp_dir> --min-size 10 --limit 1 --json` 的端到端行为，验证标准输出为合法 JSON，根路径与临时目录一致，`entries` 长度不超过 `limit`，且所有条目的 `size >= min-size`、`is_dir == false`。
+  - remaining_todos:
+    - 在无法访问 crates.io 的环境中尚未完成自动化测试运行，需要在具备依赖缓存的 CI 或开发机上执行 `cargo test --workspace` 以验证当前实现。
+    - 按验收标准补充针对错误参数组合与异常路径场景下 `--json` 模式的集成测试，确保仅在扫描成功时向 stdout 输出完整 JSON，错误信息统一写入 stderr。
 
 ### 9.2 服务模式（示例）
 
