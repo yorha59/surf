@@ -110,20 +110,40 @@ fn parse_threads(input: &str) -> Result<usize, String> {
     }
 }
 
+/// 启动 surf-service 子进程，传递给定的 host 和 port 参数。
+///
+/// 返回子进程的退出状态（如果成功启动并等待完成）。
+/// 若启动失败（例如找不到 surf-service 二进制），则返回 `Err`。
+fn run_service(host: &str, port: u16) -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("surf-service")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string())
+        .status()
+}
+
 fn main() {
     let args = Args::parse();
 
-    // 服务模式（JSON-RPC）尚未在当前工作区实现，这里只提供参数占位与清晰的错误提示，
-    // 以保证 CLI 参数与 PRD 对齐，同时避免用户误以为服务已可用。
+    // 服务模式：启动 surf-service 子进程。
     if args.service {
-        eprintln!(
-            "Service mode (--service) is not implemented yet in this build.\n\
-Planned behavior: start a JSON-RPC server listening on {host}:{port} as defined in PRD.\n\
-For now, please use one-off mode with: surf --path <dir> [--threads] [--min-size] [--limit] [--json]",
-            host = args.host,
-            port = args.port,
-        );
-        std::process::exit(1);
+        eprintln!("Starting surf-service on {}:{} ...", args.host, args.port);
+        match run_service(&args.host, args.port) {
+            Ok(status) => {
+                if status.success() {
+                    eprintln!("surf-service exited successfully.");
+                    std::process::exit(0);
+                } else {
+                    eprintln!("surf-service exited with non-zero status: {}", status);
+                    std::process::exit(status.code().unwrap_or(1));
+                }
+            }
+            Err(e) => {
+                eprintln!("failed to start surf-service: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     let min_size = match parse_size(&args.min_size) {
