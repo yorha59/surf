@@ -85,3 +85,97 @@ fn test_surf_json_output_with_min_size_and_limit() {
     // 可选：验证确实只返回了一个条目（因为 limit=1，且有两个符合条件的文件）
     // 注意：由于扫描顺序可能不确定，我们只检查长度不超过 limit，不假设具体数量。
 }
+/// 测试 `--json` 模式下，传入无法解析的 `--min-size` 参数时的行为。
+#[test]
+fn test_surf_json_error_on_invalid_min_size() {
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    cmd.args(["--min-size", "invalid", "--json"]);
+
+    let output = cmd.output().expect("failed to execute surf");
+    // 进程应以非零退出码结束
+    assert!(!output.status.success(), "surf should exit with non-zero status");
+    // stdout 不应包含任何 JSON 片段（应为空或仅空白）
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout should be empty on error, got: {}",
+        stdout
+    );
+    // stderr 应包含错误信息（检查是否包含 "Error parsing --min-size" 或类似内容）
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Error parsing --min-size") || stderr.contains("invalid size"),
+        "stderr should contain error message about min-size, got: {}",
+        stderr
+    );
+}
+
+/// 测试 `--json` 模式下，传入非法 `--threads` 值（如 0）时的行为。
+#[test]
+fn test_surf_json_error_on_invalid_threads() {
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    cmd.args(["--threads", "0", "--json"]);
+
+    let output = cmd.output().expect("failed to execute surf");
+    assert!(!output.status.success(), "surf should exit with non-zero status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout should be empty on error, got: {}",
+        stdout
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--threads must be at least 1") || stderr.contains("invalid value"),
+        "stderr should contain error message about threads, got: {}",
+        stderr
+    );
+}
+
+/// 测试 `--json` 模式下，传入不存在或不可访问的路径时的行为。
+#[test]
+fn test_surf_json_error_on_nonexistent_path() {
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    // 使用一个几乎不可能存在的路径
+    cmd.args(["--path", "/tmp/this_path_should_not_exist_123456789", "--json"]);
+
+    let output = cmd.output().expect("failed to execute surf");
+    assert!(!output.status.success(), "surf should exit with non-zero status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout should be empty on error, got: {}",
+        stdout
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 错误信息可能来自扫描器，检查是否包含 "Failed to scan" 或 "No such file"
+    assert!(
+        stderr.contains("Failed to scan") || stderr.contains("No such file") || stderr.contains("failed to scan"),
+        "stderr should contain error message about scanning, got: {}",
+        stderr
+    );
+}
+
+/// 测试非 `--json` 模式下，错误参数的行为是否与 `--json` 模式一致（stdout 无输出，stderr 有错误）。
+#[test]
+fn test_surf_non_json_error_behavior() {
+    // 测试非法 min-size 参数
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    cmd.args(["--min-size", "invalid"]);
+    // 不传递 --json
+
+    let output = cmd.output().expect("failed to execute surf");
+    assert!(!output.status.success(), "surf should exit with non-zero status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout should be empty on error, got: {}",
+        stdout
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Error parsing --min-size") || stderr.contains("invalid size"),
+        "stderr should contain error message about min-size, got: {}",
+        stderr
+    );
+}
