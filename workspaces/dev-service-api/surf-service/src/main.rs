@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use once_cell::sync::Lazy;
+use num_cpus;
 
 /// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（骨架实现）。
 ///
@@ -135,6 +137,9 @@ impl TaskManager {
     }
 }
 
+/// 全局任务管理器实例
+static TASK_MANAGER: Lazy<TaskManager> = Lazy::new(|| TaskManager::new());
+
 /// 获取当前 Unix 时间戳（秒）。
 fn current_unix_timestamp() -> u64 {
     SystemTime::now()
@@ -179,6 +184,24 @@ struct SurfScanParams {
     tag: Option<String>,
 }
 
+/// Surf.Scan 方法的成功响应结果结构体
+#[derive(Debug, Serialize)]
+struct SurfScanResult {
+    /// 任务 ID（字符串）
+    task_id: String,
+    /// 任务状态（"queued"）
+    state: String,
+    /// 扫描路径（原始 params.path）
+    path: String,
+    /// 解析后的最小文件大小阈值（字节）
+    min_size_bytes: u64,
+    /// 实际使用的扫描线程数
+    threads: usize,
+    /// TopN 限制（可选，若为 None 则序列化为 null）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
 /// JSON-RPC 错误对象（对应 error 字段）
 #[derive(Debug, Serialize)]
 struct JsonRpcError {
@@ -208,9 +231,31 @@ impl JsonRpcError {
         JsonRpcError {
             code: INVALID_REQUEST,
             message: "INVALID_REQUEST".to_string(),
-            data: detail.map(|d| json!({ "detail": d })),
+        data: detail.map(|d| json!({ "detail": d })),
+    }
+}
+
+/// JSON-RPC 成功响应（完整响应体）
+#[derive(Debug, Serialize)]
+struct JsonRpcSuccessResponse<T> {
+    /// 必须为 "2.0"
+    jsonrpc: String,
+    /// 结果对象
+    result: T,
+    /// 请求 ID（string, number, null）
+    id: Value,
+}
+
+impl<T> JsonRpcSuccessResponse<T> {
+    /// 根据结果和请求 ID 构造成功响应
+    fn from_result(result: T, id: Option<Value>) -> Self {
+        JsonRpcSuccessResponse {
+            jsonrpc: "2.0".to_string(),
+            result,
+            id: id.unwrap_or(Value::Null),
         }
     }
+}
 
     /// 构造一个标准 METHOD_NOT_FOUND 错误
     fn method_not_found(detail: Option<String>) -> Self {
@@ -797,8 +842,35 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                             // 参数结构正确，进一步校验数值合法性
                             match validate_surf_scan_params(&scan_params) {
                                 Ok(()) => {
-                                    // 数值也合法，但业务逻辑尚未落地 -> METHOD_NOT_FOUND 占位
-                                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                                    // 数值也合法，执行成功路径
+                                    // 解析 min_size_bytes
+                                    let min_size_bytes = match scan_params.min_size {
+                                        Some(ref s) => parse_size_for_service(s).unwrap_or(0),
+                                        None => 0,
+                                    };
+                                    // 计算最终线程数
+                                    let threads = scan_params.threads.unwrap_or_else(|| num_cpus::get());
+                                    // 注册任务
+                                    let task_id = TASK_MANAGER.register_task(
+                                        scan_params.path.clone(),
+                                        min_size_bytes,
+                                        threads,
+                                        scan_params.limit,
+                                        scan_params.tag.clone(),
+                                        TaskState::Queued,
+                                    );
+                                    // 构造成功响应
+                                    let result = SurfScanResult {
+                                        task_id,
+                                        state: "queued".to_string(),
+                                        path: scan_params.path,
+                                        min_size_bytes,
+                                        threads,
+                                        limit: scan_params.limit,
+                                    };
+                                    let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
+                                    // 提前返回成功响应
+                                    return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
                                 }
                                 Err(err) => {
                                     // 数值校验失败 -> INVALID_PARAMS
