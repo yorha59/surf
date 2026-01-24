@@ -393,33 +393,6 @@ struct SurfCancelResult {
     current_state: String,
 }
 
-/// Surf.GetResults 方法的参数结构体
-#[derive(Debug, Deserialize)]
-struct SurfGetResultsParams {
-    /// 任务 ID（必填）
-    task_id: String,
-    /// 结果模式，当前仅支持 "flat"（可选）
-    #[serde(default)]
-    mode: Option<String>,
-    /// 返回条目数量限制（可选）
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-/// Surf.GetResults 方法的成功响应结果结构体
-#[derive(Debug, Serialize)]
-struct SurfGetResultsResult {
-    task_id: String,
-    state: String,
-    path: String,
-    /// 总文件数（占位，暂为 0）
-    total_files: u64,
-    /// 总字节数（占位，暂为 0）
-    total_bytes: u64,
-    /// 结果条目数组（占位，暂为空数组）
-    entries: Vec<serde_json::Value>,
-}
-
 /// JSON-RPC 错误对象（对应 error 字段）
 #[derive(Debug, Serialize)]
 struct JsonRpcError {
