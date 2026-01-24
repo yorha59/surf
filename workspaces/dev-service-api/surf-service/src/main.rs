@@ -8,10 +8,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 ///
 /// 当前版本仅完成：
 /// - 命令行参数解析（host/port 等），与 PRD / Architecture 中的约定对齐；
-/// - 启动一个 TCP 监听并接受连接，但不解析 JSON-RPC 请求；
+/// - 启动一个 TCP 监听并接受连接；
+/// - 对每一行 JSON-RPC 请求做基础校验，并对未实现/未知方法返回标准错误响应；
 /// - 通过日志输出提示该服务仍处于骨架阶段。
-#[derive(Parser, Debug)]
-#[command(name = "surf-service", version, about = "Surf JSON-RPC service (skeleton)")]
+///
+/// 参数结构体 `Args` 的 Clap 属性定义见文件靠后的 `struct Args`。
 /// JSON-RPC 2.0 标准错误码（部分）
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
@@ -207,6 +208,8 @@ fn handle_rpc_line(line: &str) -> Option<String> {
     Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()))
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "surf-service", version, about = "Surf JSON-RPC service (skeleton)")]
 struct Args {
     /// 服务监听地址，默认仅监听本地回环地址 127.0.0.1
     ///
