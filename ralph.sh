@@ -12,7 +12,18 @@ fi
 
 echo "[ralph] Surf Ralph-loop 启动，无最大迭代次数限制（需手动停止或任务完成）" >&2
 
-send_feishu_status() {
+# 将任意文本做最小 JSON 转义，用于飞书文本消息
+ralph_json_escape() {
+  local s="$1"
+  s=${s//\\/\\\\}   # 反斜杠
+  s=${s//"/\\"}       # 双引号
+  s=${s//$'\n'/\\n}   # 换行
+  s=${s//$'\r'/\\r}   # 回车
+  s=${s//$'\t'/\\t}   # 制表符
+  printf '%s' "$s"
+}
+
+send_feishu_text() {
   local text="$1"
   local webhook="${FEISHU_WEBHOOK:-}"
 
@@ -21,11 +32,18 @@ send_feishu_status() {
     return 0
   fi
 
-  # 仅发送由脚本构造的简短状态文本，避免复杂转义问题
+  local escaped
+  escaped="$(ralph_json_escape "$text")"
+
   curl -sS -X POST "$webhook" \
     -H 'Content-Type: application/json' \
-    -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$text\"}}" \
+    -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"$escaped\"}}" \
     >/dev/null || true
+}
+
+# 保留旧命名，向后兼容：状态文本和完整日志都通过同一发送逻辑
+send_feishu_status() {
+  send_feishu_text "$1"
 }
 
 ralph_git_guard_with_coco() {
@@ -230,8 +248,20 @@ EOF
     echo "[ralph] 检测到 HUMAN_REQUIRED=true，本轮需要人类确认，暂停循环" >&2
   fi
 
-  # 将本轮结果同步到飞书（如配置了 FEISHU_WEBHOOK）
-  send_feishu_status "[ralph] 第 $step 轮结束: RALPH_DONE=${done_flag}, HUMAN_REQUIRED=${human_flag}"
+  # 将本轮完整控制台信息同步到飞书（如配置了 FEISHU_WEBHOOK）
+  # 内容包含轮次标记、Coco 输出以及结束状态，便于在飞书侧完整查看本轮执行情况
+  if [[ -n "${FEISHU_WEBHOOK:-}" ]]; then
+    full_round_msg=$(cat <<EOF
+================ Ralph 第 $step 轮 ================
+[ralph] 第 $step 轮开始
+
+$RESPONSE
+
+[ralph] 第 $step 轮结束: RALPH_DONE=${done_flag}, HUMAN_REQUIRED=${human_flag}
+EOF
+)
+    send_feishu_text "$full_round_msg"
+  fi
 
   # 每轮结束后由编排脚本执行一次自动提交/推送（如有变更），避免提交构建产物
   ralph_git_auto_commit "$step"
