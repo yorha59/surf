@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use surf_core::scan;
 use serde::Serialize;
+use std::time::Duration;
+use indicatif::{ProgressBar, ProgressStyle};
 
 /// Surf CLI: disk usage scanner (minimal initial implementation).
 #[derive(Parser, Debug)]
@@ -133,9 +135,20 @@ For now, please use one-off mode with: surf --path <dir> [--threads] [--min-size
     };
 
     // 将线程数参数传递给核心扫描器，由其控制实际并发度。
+    // 创建 spinner 进度指示器，输出到 stderr
+    let pb = ProgressBar::new_spinner();
+    pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    pb.enable_steady_tick(Duration::from_millis(100));
+    pb.set_message(format!("Scanning {} ...", args.path.display()));
+    pb.set_style(ProgressStyle::default_spinner());
+
     let entries = match scan(&args.path, min_size, args.threads) {
-        Ok(v) => v,
+        Ok(v) => {
+            pb.finish_and_clear();
+            v
+        }
         Err(e) => {
+            pb.finish_and_clear();
             eprintln!("Failed to scan {}: {}", args.path.display(), e);
             std::process::exit(1);
         }
