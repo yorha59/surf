@@ -201,7 +201,7 @@
     - 在扫描结束后，服务层调用 `collect_results(handle)` 获取完整 `Vec<FileEntry>`，再委托数据聚合层构造 `AggregatedResult` 并挂载到任务上，供 `Surf.GetResults` 使用；`AggregatedResult.entries` 与 CLI `JsonEntry` 保持字段/语义对齐。
     - 对于取消场景，服务层调用 `cancel(&handle)` 尝试中断底层遍历，同时将任务状态迁移为 `canceled`；无论底层是否能立即终止，后续 `Surf.Status` / `Surf.GetResults` 均以服务层状态机为主，核心层仅提供尽力而为的取消信号。
 
-> 以上进度感知 API（`ScanConfig` / `ScanProgress` / `StatusSnapshot` / `ScanHandle` 及其方法）最初作为架构级设计提出，现已在 `surf-core` 代码中落地，并被 CLI 单次运行模式实际使用（参见 `workspaces/dev-core-scanner/surf-core/src/lib.rs` 与 `workspaces/dev-cli-tui/surf-cli/src/main.rs`）。当前实现仍存在若干局限：`total_bytes_estimate` 始终为 `None`，尚未对总字节数做估算；扫描逻辑尚未依据内部 `cancelled` 标志提前终止遍历，因此取消语义仍然是“占位/最佳努力”；CLI 侧虽然已经基于 `poll_status` 展示了 `scanned_files` 与 `scanned_bytes`，但尚未将 Ctrl+C 映射为显式的取消请求。后续迭代由 `dev-core-scanner`、`dev-service-api` 与 `dev-cli-tui` 协同继续完善这些行为，以完全满足 PRD 9.1.1 与 9.2 中关于 `progress` / `scanned_files` / `scanned_bytes` 的验收要求。
+> 以上进度感知 API（`ScanConfig` / `ScanProgress` / `StatusSnapshot` / `ScanHandle` 及其方法）最初作为架构级设计提出，现已在 `surf-core` 代码中落地，并被 CLI 单次运行模式实际使用（参见 `workspaces/dev-core-scanner/surf-core/src/lib.rs` 与 `workspaces/dev-cli-tui/surf-cli/src/main.rs`）。当前实现仍存在若干局限：`total_bytes_estimate` 始终为 `None`，尚未对总字节数做估算；扫描逻辑尚未依据内部 `cancelled` 标志提前终止遍历，因此取消语义仍然是“占位/最佳努力”；CLI 侧已经基于 `poll_status` 展示了 `scanned_files` 与 `scanned_bytes`，并在收到 Ctrl+C（SIGINT）时调用 `cancel(&handle)`、清理进度条并以约定的非零退出码退出，但由于核心扫描器尚未在遍历过程中主动检查取消标志，实际停止时间仍可能滞后。后续迭代由 `dev-core-scanner`、`dev-service-api` 与 `dev-cli-tui` 协同继续完善这些行为，以完全满足 PRD 9.1.1 与 9.2 中关于 `progress` / `scanned_files` / `scanned_bytes` 的验收要求。
 
 ### 4.2 数据聚合层 (Data Aggregator)
 - **模块职责**：

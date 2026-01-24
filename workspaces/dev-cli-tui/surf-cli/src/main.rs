@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use surf_core::{ScanConfig, start_scan, poll_status, collect_results};
+use surf_core::{ScanConfig, start_scan, poll_status, collect_results, cancel};
 use serde::Serialize;
 use std::time::Duration;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use ctrlc;
 
 /// Surf CLI: disk usage scanner (minimal initial implementation).
 #[derive(Parser, Debug)]
@@ -146,6 +148,16 @@ fn main() {
         }
     }
 
+    // 创建中断标志，用于响应 Ctrl+C
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupted_clone = interrupted.clone();
+    if let Err(e) = ctrlc::set_handler(move || {
+        interrupted_clone.store(true, Ordering::SeqCst);
+    }) {
+        eprintln!("Failed to set Ctrl+C handler: {}", e);
+        std::process::exit(1);
+    }
+
     let min_size = match parse_size(&args.min_size) {
         Ok(v) => v,
         Err(e) => {
@@ -170,6 +182,13 @@ fn main() {
     };
     
     // 启动异步扫描任务
+    // 检查是否已经收到中断信号
+    if interrupted.load(Ordering::SeqCst) {
+        pb.finish_and_clear();
+        eprintln!("Scan interrupted by user (Ctrl+C)");
+        std::process::exit(130);
+    }
+
     let handle = match start_scan(config) {
         Ok(v) => {
             v
@@ -183,6 +202,14 @@ fn main() {
     
     // 轮询扫描进度，更新进度条消息
     loop {
+        // 检查用户是否按下了 Ctrl+C
+        if interrupted.load(Ordering::SeqCst) {
+            pb.finish_and_clear();
+            cancel(&handle);
+            eprintln!("Scan interrupted by user (Ctrl+C)");
+            std::process::exit(130);
+        }
+
         let status = poll_status(&handle);
         pb.set_message(format!(
             "Scanning {} ... files={}, bytes={}",
