@@ -209,10 +209,12 @@
   - 对于错误参数组合（例如不支持的标志），仍然打印清晰错误信息到标准错误输出，并避免输出部分或不完整的 JSON 结构。
   - impl_notes (iteration 2 / dev-cli-tui):
     - `workspaces/dev-cli-tui/surf-cli/src/main.rs:59` 定义了 `JsonEntry`/`JsonOutput` 结构，当前 JSON 根对象包含 `root` 与 `entries` 数组，条目字段为 `path`、`size`、`is_dir`（扫描器目前仅返回文件，目录条目暂不支持）。
-    - `workspaces/dev-cli-tui/surf-cli/tests/integration.rs:9` 覆盖了 `--path <temp_dir> --min-size 10 --limit 1 --json` 的端到端行为，验证标准输出为合法 JSON，根路径与临时目录一致，`entries` 长度不超过 `limit`，且所有条目的 `size >= min-size`、`is_dir == false`。
+    - `workspaces/dev-cli-tui/surf-cli/tests/integration.rs:9` 起，包含以下端到端用例：
+      - `--path <temp_dir> --min-size 10 --limit 1 --json` 成功路径，验证 stdout 为合法 JSON、`root` 与临时目录一致，`entries` 长度不超过 `limit`、`size >= min-size` 且 `is_dir == false`。
+      - `--json` 模式下非法 `--min-size`、非法 `--threads`、不存在路径等错误场景，均保证进程非零退出、stdout 保持空白、错误信息仅输出到 stderr；非 `--json` 模式下非法 `--min-size` 行为与之保持一致。
   - remaining_todos:
-    - 在无法访问 crates.io 的环境中尚未完成自动化测试运行，需要在具备依赖缓存的 CI 或开发机上执行 `cargo test --workspace` 以验证当前实现。
-    - 按验收标准补充针对错误参数组合与异常路径场景下 `--json` 模式的集成测试，确保仅在扫描成功时向 stdout 输出完整 JSON，错误信息统一写入 stderr。
+    - 当前开发环境无法从 crates.io 拉取依赖（`rayon` 等），`cargo test --workspace` 与 `cargo test --workspace --offline` 均因缺少远端索引/缓存而失败，后续需在具备网络或完整依赖缓存的 CI / 开发机上执行一次完整的 `cargo test --workspace` 以验证实现与这些集成测试。
+    - 在 CI 流水线中启用并稳定上述 `workspaces/dev-cli-tui/surf-cli/tests/integration.rs` 用例，作为回归保护，避免未来改动破坏 `--json` 模式下的 stdout/stderr 语义。
 
 ### 9.2 服务模式（示例）
 
