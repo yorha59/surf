@@ -48,20 +48,114 @@
 
 ### 4.1 核心扫描引擎 (Scanner Engine)
 - **模块职责**：
-  - 并发扫描磁盘文件系统
-  - 收集文件元数据（路径、大小、修改时间等）
-  - 处理权限不足的目录
-  - 支持过滤规则
+  - 并发扫描本地磁盘文件系统（当前形态为**一次性同步扫描**）
+  - 收集文件层面的元数据（至少包含：路径、大小），并按大小降序排序
+  - 按最小文件大小阈值进行过滤，屏蔽小于 `min_size` 的文件
+  - 处理不存在路径、权限不足等基础错误场景，并以 `std::io::Error` 形式反馈给上层
 - **模块边界**：
-  - 负责：文件系统扫描、元数据收集、过滤处理
-  - 不负责：结果展示、持久化存储
-- **对外提供的能力**：
-  - `scan(path, min_size, threads)`：启动扫描并返回结果
-  - `status()`：获取扫描进度和状态
+  - 负责：文件系统遍历、文件元数据获取与过滤、结果排序
+  - 不负责：结果展示、JSON/表格序列化、任务生命周期管理与持久化存储
 - **依赖哪些模块**：
-  - 标准库：`std::fs`, `std::thread`
-  - 第三方：`rayon` 或 `tokio` 用于并发
-- **推荐负责人角色**：后端工程师
+  - 标准库：`std::fs`, `std::path`, `std::io`
+  - 第三方：`walkdir` 用于递归遍历目录树，`rayon` 用于并行扫描
+- **推荐负责人角色**：后端工程师（dev-core-scanner 工作区）
+
+- **核心数据结构与 API 形态（对应 `workspaces/dev-core-scanner/surf-core`）**：
+  - 结果条目类型：
+
+    ```rust
+    pub struct FileEntry {
+        pub path: PathBuf,
+        pub size: u64,
+    }
+    ```
+
+    - 语义：
+      - `path`：文件的绝对或相对路径，由底层扫描遍历得到；当前仅返回**文件**，不返回目录条目。
+      - `size`：文件大小（单位：字节），直接来自底层 `metadata.len()`。
+      - 该结构体实现 `Clone` 和 `serde::Serialize`，便于上层进行排序重用和直接序列化。
+
+  - 核心扫描函数签名与行为：
+
+    ```rust
+    pub fn scan(root: &Path, min_size: u64, threads: usize) -> std::io::Result<Vec<FileEntry>>
+    ```
+
+    - 参数含义：
+      - `root`：起始扫描根目录（对应 CLI 的 `--path` 参数；服务层的 `Surf.Scan.params.path` 在落到核心层前需解析为 `Path`）。
+      - `min_size`：最小文件大小阈值（单位：字节），对应 CLI 解析后的 `--min-size`，以及服务层解析后的 `min_size`；小于该值的文件会被过滤掉。
+      - `threads`：工作线程数，对应 CLI 的 `--threads`，以及服务层中的并发度配置；
+        - CLI 层保证 `threads >= 1`，核心层内部对传入的 0 做防御性修正（退化为 1）。
+    - 行为约定：
+      - 若 `root` 不存在，则立即返回 `ErrorKind::NotFound` 类型的 `std::io::Error`，错误消息中包含形如 `"does not exist"` 的提示，供上层直接展示。
+      - 使用 `walkdir::WalkDir` 递归遍历 `root` 下所有条目，对每个条目读取元数据：
+        - 仅保留 `metadata.is_file() == true` 的文件条目；目录、符号链接等在当前迭代中一律过滤掉。
+        - 仅保留 `metadata.len() >= min_size` 的文件，确保与 CLI / 服务层的最小文件大小过滤语义一致。
+      - 使用 `rayon` 在局部线程池中并发执行上述遍历与过滤逻辑，线程数由 `threads` 控制。
+      - 返回值为 **完整的** `Vec<FileEntry>`，并保证按 `size` 字段降序排序：
+        - 关于 TopN 截断（`limit`）：当前设计中 **不在核心层处理**，而是由 CLI / 服务层在消费该 `Vec<FileEntry>` 时自行截断；这一点与 PRD 中 `--limit` 的语义保持一致。
+
+- **配置与上层参数映射（CLI / 服务层）**：
+  - CLI 单次运行模式：
+    - `--path` → 直接映射为 `Args.path: PathBuf`，随后传入 `scan(&args.path, ...)`。
+    - `--min-size` → 在 CLI 内通过 `parse_size(min_size: &str) -> Result<u64, String>` 解析为字节数；
+      - 解析失败时，CLI 在 stderr 输出 `"Error parsing --min-size: ..."` 并以非零状态码退出，**不会调用核心扫描函数**，确保 `--json` 模式下 stdout 保持空白（符合 PRD 9.1.3）。
+    - `--threads` → 在 CLI 层通过 `parse_threads` 校验，禁止 0 或非法值；校验失败同样只在 stderr 输出错误并非零退出，不触发扫描。
+    - `--limit` → 仅在 CLI 层使用，用于对 `Vec<FileEntry>` 进行 `take(limit)`；核心层对 `limit` 不感知。
+  - 服务层（JSON-RPC `Surf.Scan`）的设计对齐：
+    - `Surf.Scan.params.path` / `min_size` / `threads` / `limit` 与 CLI 参数在语义上保持一致：
+      - 服务层负责将字符串形式的 `path`、`min_size` 转换/解析为 `Path` 与字节数，再调用核心扫描函数或其异步包装。
+      - `limit` 仍然作为结果裁剪参数，仅在聚合/结果阶段生效，不应传入核心层。
+    - 若未来在核心层引入 `ScanConfig` 结构体封装上述参数，可以在不改变 CLI / 服务层外部接口的前提下进行重构（**未来迭代可调整**）。
+
+- **返回结果与序列化约定（与 CLI JSON / 服务层对齐）**：
+  - 核心层对上游只暴露 `Vec<FileEntry>`，不关心具体输出格式；
+  - CLI / 服务层在将结果序列化为 JSON/表格/CSV 时，**应以 `FileEntry` 或其聚合视图为基础**，避免各自拼装不兼容字段集合：
+    - CLI `--json` 模式当前采用以下结构（位于 `workspaces/dev-cli-tui/surf-cli/src/main.rs`）：
+
+      ```rust
+      #[derive(Serialize)]
+      struct JsonEntry {
+          path: String,
+          size: u64,
+          is_dir: bool,
+      }
+
+      #[derive(Serialize)]
+      struct JsonOutput {
+          root: String,
+          entries: Vec<JsonEntry>,
+      }
+      ```
+
+      - 构造规则：
+        - `root` 直接来自 CLI 参数 `Args.path` 的字符串表示，代表本次扫描的根路径；
+        - `entries` 由 `Vec<FileEntry>` 映射而来，基于 `limit` 截断：
+          - `path` ← `FileEntry.path.display().to_string()`；
+          - `size` ← `FileEntry.size`；
+          - `is_dir` ← 当前固定为 `false`，因为核心扫描器仅返回文件条目（目录条目暂不支持，**未来迭代可调整**）。
+      - 该结构满足 PRD 9.1.3 中“根路径 + 条目数组（含完整路径、大小、目录标识）”的要求；任何改动需保持 JSON 结构与 `surf-core::FileEntry` 语义的一致性。
+    - 服务层 `Surf.GetResults` 中的 `entries` 列表应在概念上与上述 `JsonEntry` 兼容：
+      - 至少包含 `path: string`、`size: number`、`is_dir: boolean` 等字段；
+      - 可在聚合层/服务层中额外扩展 `file_type`、`modified_at` 等字段，但这些字段应从更完整的核心结果或聚合结构中推导，而不是在各前端（CLI/GUI）中各自发明。
+
+- **与上层模块的契约（CLI 单次运行 & 服务层任务管理）**：
+  - CLI 单次运行模式（One-off）调用约定：
+    - CLI 以同步方式调用 `scan(&path, min_size_bytes, threads)`，等待结果返回：
+      - 成功时，根据 `--json` 决定走 JsonOutput 序列化或表格打印路径；
+      - 失败时，进度指示器由 CLI 层负责清理，错误文案基于 `std::io::Error` 直接渲染到 stderr，并以非零状态码退出，不输出部分结果。
+    - 进度条与日志完全在 CLI 层实现，核心扫描引擎不承担进度上报职责（未来如需支持更细粒度进度，可在不破坏现有同步接口的前提下增加额外 API，**未来迭代可调整**）。
+  - 服务层任务管理（ScanHandle / StatusSnapshot / AggregatedResult）的预期集成方式：
+    - 当前 `surf-service` 仅实现 JSON-RPC 协议骨架，尚未真正调用 `surf-core`；
+    - 设计上，服务层应基于本节定义的同步扫描 API，演进出如下抽象（见 4.3.7）：
+      - `start_scan(path, min_size, threads) -> ScanHandle`
+      - `poll_status(handle) -> StatusSnapshot`
+      - `collect_results(handle) -> AggregatedResult`
+      - `cancel(handle)`
+    - 在最小实现阶段，可以简单地在后端任务线程中调用一次 `scan(...)` 并将返回的 `Vec<FileEntry>` 交给数据聚合层构造 `AggregatedResult`，再由服务层缓存并通过 `Surf.GetResults` 返回：
+      - `AggregatedResult.entries` 中的每个元素与 CLI `JsonEntry` 保持字段/语义对齐；
+      - `StatusSnapshot` 中的 `scanned_files` / `scanned_bytes` 等字段从扫描过程中维护的计数器中获得，与最终结果总数保持一致。
+    - 以上 `ScanHandle` / `StatusSnapshot` / `AggregatedResult` 仅作为面向服务层的抽象契约，具体结构体名称与字段可在后续迭代中细化或调整，但需要继续以 `FileEntry` 及其聚合视图为统一数据源（**未来迭代可调整**）。
 
 ### 4.2 数据聚合层 (Data Aggregator)
 - **模块职责**：
@@ -78,6 +172,8 @@
 - **依赖哪些模块**：
   - 核心扫描引擎的扫描结果
 - **推荐负责人角色**：后端工程师
+  
+> 当前实现中，与 TopN 相关的基础聚合能力（按 `size` 降序排序、按 `min_size` 过滤）仍由 `surf-core` crate 中的 `scan` 函数内部完成；本层在后续迭代中可以/建议逐步承接更多聚合与派生指标（如目录级汇总、文件类型分布等），但本轮不对接口形式做强约束，未来迭代可调整。
 
 ### 4.3 服务层 (Service Layer)
 - **模块职责**：
