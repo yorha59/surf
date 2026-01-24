@@ -805,6 +805,7 @@
     - 如在仓库根目录统一构建，可使用：
       - `cargo build -p surf-service --release`（产物路径为根目录下 `target/release/surf-service`）。
     - 构建注意事项：在部分离线或使用镜像源的环境中，`cargo build -p surf-service --release` 可能因 `clap` / `clap_builder` 依赖解析冲突而失败（例如报错 `failed to select a version for clap_builder ... does not have these features`）；这类问题属于构建环境与上游依赖的版本/特性对齐问题，需要在具备网络或完整依赖缓存的本地/CI 环境中由人类开发者调整依赖版本或 Cargo 配置后重新构建。本仓库不在架构层面对具体镜像或依赖修复策略做出强约束，仅约定成功构建后应按上述路径产出 `surf-service` 二进制供交付阶段使用。
+    - 现实状态注记（iteration 76 / delivery）：当前仓库根下的 `release/linux-x86_64/service/surf-service` 二进制仍是早期仅提供监听能力的占位实现，启动时会在 stdout 打印类似 “surf-service listening on 127.0.0.1:21523 ... JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet; this binary ...” 的提示，并不会对 JSON-RPC 请求返回有效响应。受上述 `clap_builder` 依赖冲突限制，本运行环境暂无法从最新源码重新构建 `surf-service` 并同步到 `release/` 目录。因此，本轮交付阶段引入的 `test/scripts/service_jsonrpc_basic.sh` 与 `test/scripts/service_jsonrpc_invalid_params.sh` 在本环境中预期会失败，其错误日志会包含该占位文案；后续需在具备正常 crates.io/镜像配置的开发机或 CI 上修复依赖问题、重建 `target/release/surf-service` 并将其拷贝为 `release/linux-x86_64/service/surf-service` 后，再以这些脚本作为 JSON-RPC 基本/错误路径的交付验收基线。
 
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
