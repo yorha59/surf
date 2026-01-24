@@ -233,7 +233,7 @@ impl TaskManager {
     /// 如果已经缓存，直接返回缓存的聚合结果。
     /// 否则，尝试从 scan_handle 收集结果，缓存并返回。
     /// 如果收集失败，将任务状态更新为 Failed 并返回错误。
-    fn collect_results_if_needed(&self, task_id: &str) -> Result<CollectedResults, JsonRpcError> {
+    fn collect_results_if_needed(&self, task_id: &str) -> Result<(AggregatedResult, Option<usize>), JsonRpcError> {
         let mut inner = self.inner.lock().map_err(|_| {
             JsonRpcError::invalid_params(Some("task manager mutex poisoned".to_string()))
         })?;
@@ -258,7 +258,7 @@ impl TaskManager {
         
         // 如果已有缓存，直接返回
         if let Some(ref cached) = info.aggregated_result {
-            return Ok(CollectedResults { path: info.path.clone(), limit: info.limit, aggregated_result: cached.clone() });
+            return Ok((cached.clone(), info.limit));
         }
         
         // 否则，需要收集结果
