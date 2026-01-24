@@ -287,14 +287,13 @@
       - `run_service` 对子进程启动失败或非零退出码仅打印错误信息到 stderr 并以相应退出码结束当前 CLI 进程，不承担任何 JSON-RPC 客户端或健康检查逻辑，仅作为“本地服务进程启动入口”。
     - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 启动本地 JSON-RPC 监听”“通过 `Surf.Scan` 真正启动核心扫描并在任务表中保存 `ScanHandle`”“通过 `Surf.Status` 反映真实扫描进度（在 `total_bytes_estimate` 为 `None` 时退化为仅返回已扫描文件数与字节数）”“通过 `Surf.Cancel` 在状态迁移为 `Canceled` 时调用 `surf_core::cancel(handle)` 发出取消信号”以及基础的单元测试覆盖；但仍存在以下差距：
       - `Surf.GetResults` 仍统一返回 `METHOD_NOT_FOUND`（错误详情为 `"method not implemented yet"`），尚无任何结果返回路径；
-      - 任务状态机尚未结合 `StatusSnapshot.done` / 核心错误信息自动将 `TaskState::Running` 迁移为 `Completed` / `Failed`，导致服务端仅能依赖未来显式更新逻辑完成终止态标记；
+      - 任务状态机目前仅在 `SurfStatusResult::from_task_info` 中通过 `surf_core::poll_status(&handle)` 做**惰性更新**：当底层扫描 `done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务迁移为 `Completed` 或 `Failed` 并回写到 `TASK_MANAGER`；尚未引入独立的后台轮询/调度协程来周期性刷新所有运行中任务，也未在任务表中记录更细粒度的失败原因摘要；
       - `--max-concurrent-scans` 与 `--task-ttl-seconds` 仍未参与实际并发控制与 TTL 回收，服务在高并发与长期运行场景下的资源边界未被约束；
       - 目前仍缺少以 `surf-service` 实际二进制（可由 `surf --service` 启动）为入口的端到端验收路径，尚无法系统性验证“多次发起扫描 → 查询进度 → 获取结果/取消”的完整闭环，因此**本 story 的 `status` 仍保持为 `pending`**。
   - remaining_todos:
-    - 方向一：任务状态机与核心进度/错误的深度集成
-      - 在 `TaskManager` 基础上，结合 `surf_core::poll_status(&handle)` 返回的 `StatusSnapshot`，设计并落地服务层任务状态迁移规则：当底层扫描 `done == true` 且无错误时，自动将 `TaskState::Running` 迁移为 `Completed`；当核心层在 `StatusSnapshot` 或结果收集阶段暴露错误时，将任务迁移为 `Failed` 并记录可诊断信息（可放入 JSON-RPC `error.data` 或任务表扩展字段）。
-      - 明确 `Surf.Status` 在任务已终止时的行为：是继续返回终止态任务的快照（包括最终进度/时间戳），还是只对非终止态任务返回状态，并在 PRD/Architecture 中对这两种模式的取舍做出约定，保证 GUI/调用方可以稳定依赖该语义。
-      - 结合上述状态迁移规则，评估是否需要在任务表中显式记录“最近一次核心错误摘要”或“最终结果快照元信息”（例如总文件数、总大小），以便在不调用 `Surf.GetResults` 的情况下也能通过 `Surf.Status` 获取最小必要的任务完成信息。
+    - 方向一：任务状态机与核心进度/错误的深度集成（已部分落地）
+      - 当前版本在 `SurfStatusResult::from_task_info` 中，当 `TaskInfo.scan_handle` 存在且 `surf_core::poll_status(&handle)` 返回的 `StatusSnapshot.done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务惰性迁移为 `Completed` 或 `Failed`，并通过 `TASK_MANAGER.update_task_state` 回写到任务表（参见 `workspaces/dev-service-api/surf-service/src/main.rs:318` 附近的实现），基本对齐 Architecture.md 4.3.7 中关于“结合 StatusSnapshot.done / error 更新任务状态机”的约定。
+      - 仍需补充：明确 `Surf.Status` 在任务已终止时的长期行为（例如是否始终返回终止态任务的快照、是否只返回非终止态任务）、是否需要在任务表中显式记录“最近一次核心错误摘要”或“最终结果快照元信息”（例如总文件数、总大小），以便在不调用 `Surf.GetResults` 的情况下也能通过 `Surf.Status` 获取最小必要的任务完成信息，并在 PRD/Architecture 中对这些行为做出稳定约定，供 GUI/调用方依赖。
     - 方向二：并发控制与 TTL 回收策略（围绕 `max-concurrent-scans` / `task-ttl-seconds` 落地）
       - 基于 `Args.max_concurrent_scans` 在服务层实现“同时运行的扫描任务上限”：在 `Surf.Scan` 创建新任务前检查当前处于 `Running` 状态且绑定了 `scan_handle` 的任务数量，超出上限时要么直接返回业务错误（例如新的 JSON-RPC 错误码 `TOO_MANY_ACTIVE_TASKS`），要么实现明确的排队语义（在 PRD/Architecture 中约定清楚，并通过 `Surf.Status` 显示队列位置或排队状态）。
       - 基于 `Args.task_ttl_seconds` 为终止态任务（`Completed` / `Failed` / `Canceled`）引入周期性回收机制：可以通过后台清理任务、在 `Surf.Status` 调用时 opportunistic 清理或在新任务创建前触发一次清理，确保任务表不会在长时间运行的服务进程中无限增长。
