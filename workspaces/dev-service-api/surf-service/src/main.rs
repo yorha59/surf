@@ -132,10 +132,38 @@ impl TaskManager {
     ///
     /// 返回值为克隆的 `TaskInfo`，避免在调用方持有互斥锁。
     fn get_task_info(&self, task_id: &str) -> Option<TaskInfo> {
-        let inner = self.inner.lock().ok()?;
-        inner.get(task_id).cloned()
-    }
+       let inner = self.inner.lock().ok()?;
+       inner.get(task_id).cloned()
+   }
 }
+    /// 更新任务状态并返回更新后的任务信息快照。
+    ///
+    /// 若任务存在，则更新其 `state` 字段为 `new_state`，同时将 `updated_at`
+    /// 设置为当前 Unix 时间戳（秒），并返回更新后的 `TaskInfo` 克隆。
+    /// 若任务不存在，返回 `None`。
+    fn update_task_state(&self, task_id: &str, new_state: TaskState) -> Option<TaskInfo> {
+       let mut inner = self.inner.lock().ok()?;
+       let info = inner.get_mut(task_id)?;
+       let previous_state = info.state;
+       info.state = new_state;
+       info.updated_at = current_unix_timestamp();
+       // 返回克隆，避免持有锁
+       Some(info.clone())
+   }
+    /// 更新任务状态并返回更新后的任务信息快照。
+    ///
+    /// 若任务存在，则更新其 `state` 字段为 `new_state`，同时将 `updated_at`
+    /// 设置为当前 Unix 时间戳（秒），并返回 `(previous_state, updated_info)` 元组。
+    /// 若任务不存在，返回 `None`。
+    fn update_task_state(&self, task_id: &str, new_state: TaskState) -> Option<(TaskState, TaskInfo)> {
+        let mut inner = self.inner.lock().ok()?;
+        let info = inner.get_mut(task_id)?;
+        let previous_state = info.state;
+        info.state = new_state;
+        info.updated_at = current_unix_timestamp();
+        // 返回克隆，避免持有锁
+        Some((previous_state, info.clone()))
+    }
 
 /// 全局任务管理器实例
 static TASK_MANAGER: Lazy<TaskManager> = Lazy::new(|| TaskManager::new());
@@ -225,6 +253,14 @@ struct SurfStatusResult {
     updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tag: Option<String>,
+}
+
+/// Surf.Cancel 方法的成功响应结果结构体
+#[derive(Debug, Serialize)]
+struct SurfCancelResult {
+    task_id: String,
+    previous_state: String,
+    current_state: String,
 }
 
 /// JSON-RPC 错误对象（对应 error 字段）
