@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn test_invalid_json() {
         // 无效的 JSON 应该返回 INVALID_REQUEST 错误
-        let response = handle_rpc_line("{ invalid json }", 4, 4).unwrap();
+        let response = handle_rpc_line("{ invalid json }", 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["error"]["code"], INVALID_REQUEST);
@@ -722,7 +722,7 @@ mod tests {
     fn test_missing_jsonrpc_field() {
         // 缺少 jsonrpc 字段应该返回 INVALID_REQUEST
         let request = r#"{"method": "Surf.Scan", "id": 1}"#;
-        let response = handle_rpc_line(request, 4, 4).unwrap();
+        let response = handle_rpc_line(request, 4).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["error"]["code"], INVALID_REQUEST);
     }
@@ -1504,8 +1504,10 @@ impl JsonRpcErrorResponse {
     }
 }
 
-/// 解析一行 JSON-RPC 请求并生成相应的错误响应（如果请求无效或方法未实现）
-fn handle_rpc_line(line: &str, max_concurrent_scans: usize, 4) -> Option<String> {
+/// 解析一行 JSON-RPC 请求并生成相应的响应（成功或错误）。
+///
+/// `max_concurrent_scans` 用于在 Surf.Scan 分支内实施“同时运行扫描任务数”的硬上限。
+fn handle_rpc_line(line: &str, max_concurrent_scans: usize) -> Option<String> {
     // 空行或仅空白则跳过
     if line.trim().is_empty() {
         return None;
@@ -1577,6 +1579,23 @@ fn handle_rpc_line(line: &str, max_concurrent_scans: usize, 4) -> Option<String>
                                     };
                                     // 计算最终线程数
                                     let threads = scan_params.threads.unwrap_or_else(|| num_cpus::get());
+
+                                    // 在启动新扫描前检查当前并发数是否已达上限。
+                                    let running_with_handle = TASK_MANAGER.count_running_tasks_with_handle();
+                                    if running_with_handle >= max_concurrent_scans {
+                                        let detail = format!(
+                                            "too many active scan tasks (running_with_handle={}, max_concurrent_scans={})",
+                                            running_with_handle, max_concurrent_scans
+                                        );
+                                        let error = JsonRpcError {
+                                            code: CONCURRENCY_LIMIT_EXCEEDED,
+                                            message: "CONCURRENCY_LIMIT_EXCEEDED".to_string(),
+                                            data: Some(json!({ "detail": detail })),
+                                        };
+                                        let response = JsonRpcErrorResponse::from_error(error, req.id);
+                                        return Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()));
+                                    }
+
                                     // 构造 surf-core 扫描配置
                     let config = surf_core::ScanConfig {
                         root: PathBuf::from(&scan_params.path),
@@ -1895,7 +1914,6 @@ fn handle_rpc_line(line: &str, max_concurrent_scans: usize, 4) -> Option<String>
 #[derive(Parser, Debug)]
 #[command(name = "surf-service", version, about = "Surf JSON-RPC service (skeleton)")]
 struct Args {
-    /// 服务监听地址，默认仅监听本地回环地址 127.0.0.1
     ///
     /// 对应 Architecture.md 4.3.1 中的安全默认值约定。
     #[arg(long = "host", default_value = "127.0.0.1")]
@@ -1928,7 +1946,7 @@ async fn handle_connection(socket: tokio::net::TcpStream, peer: std::net::Socket
 
     while let Some(line) = lines.next_line().await? {
         // 使用 handle_rpc_line 处理每一行
-        if let Some(response) = handle_rpc_line(&line, max_concurrent_scans, 4) {
+        if let Some(response) = handle_rpc_line(&line, max_concurrent_scans) {
             // 记录请求摘要（方法名或错误类型）
             eprintln!("[{}] request line: {} -> response: {}", peer, line.trim(), response);
             write_half.write_all(response.as_bytes()).await?;
