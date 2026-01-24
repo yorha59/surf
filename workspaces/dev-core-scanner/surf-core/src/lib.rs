@@ -104,7 +104,9 @@ pub fn scan(root: &Path, min_size: u64, threads: usize) -> std::io::Result<Vec<F
 
 /// 扫描任务的句柄，用于查询进度、获取结果或取消任务。
 /// 
-/// 该类型实现了 `Send` 和 `Sync`，可以在线程间安全传递。
+/// 该类型实现了 `Send` 和 `Sync`，可以在线程间安全传递；
+/// 同时通过 `Clone` 共享同一内部状态（基于 `Arc`）。
+#[derive(Clone)]
 pub struct ScanHandle {
     inner: Arc<ScanState>,
 }

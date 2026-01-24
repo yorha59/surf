@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
@@ -70,8 +70,9 @@ struct TaskInfo {
     updated_at: u64,
     /// 当前任务状态（queued/running/completed/failed/canceled）。
     state: TaskState,
-    /// 底层扫描任务的句柄（如果有）。
-    scan_handle: Option<Arc<surf_core::ScanHandle>>,
+    /// 底层扫描任务的句柄（如果有）。直接持有 `ScanHandle`，
+    /// 具体的并发共享由其内部的 `Arc` 负责。
+    scan_handle: Option<surf_core::ScanHandle>,
 }
 
 /// 内存中的简单任务管理器骨架。
@@ -112,7 +113,7 @@ impl TaskManager {
         limit: Option<usize>,
         tag: Option<String>,
         state: TaskState,
-        scan_handle: Option<Arc<surf_core::ScanHandle>>,
+        scan_handle: Option<surf_core::ScanHandle>,
     ) -> String {
         let task_id = self.next_task_id();
         let now = current_unix_timestamp();
@@ -1415,9 +1416,8 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                     // 启动真实扫描任务
                     match surf_core::start_scan(config) {
                         Ok(handle) => {
-                            // 扫描已启动，保存句柄并用 Arc 包装
-                            let handle_arc = Arc::new(handle);
-                            // 注册任务，状态为 Running，传入扫描句柄
+                            // 扫描已启动，注册任务并传入扫描句柄。`ScanHandle`
+                            // 内部基于 `Arc` 共享状态，这里无需再额外包一层 `Arc`。
                             let task_id = TASK_MANAGER.register_task_with_handle(
                                 scan_params.path.clone(),
                                 min_size_bytes,
@@ -1425,7 +1425,7 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                 scan_params.limit,
                                 scan_params.tag.clone(),
                                 TaskState::Running,
-                                Some(handle_arc.clone()),
+                                Some(handle),
                             );
                             // 构造成功响应
                             let result = SurfScanResult {
