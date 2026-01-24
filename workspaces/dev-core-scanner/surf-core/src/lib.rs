@@ -3,12 +3,43 @@ use std::path::{Path, PathBuf};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 use rayon::ThreadPoolBuilder;
 use walkdir::WalkDir;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 /// A single file entry discovered by the scanner.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub size: u64,
+}
+
+/// 配置扫描任务的参数。
+#[derive(Debug, Clone)]
+pub struct ScanConfig {
+    pub root: PathBuf,
+    pub min_size: u64,
+    pub threads: usize,
+}
+
+/// 扫描进度快照。
+#[derive(Debug, Clone)]
+pub struct ScanProgress {
+    pub scanned_files: u64,
+    pub scanned_bytes: u64,
+    pub total_bytes_estimate: Option<u64>,
+}
+
+/// 扫描状态快照。
+#[derive(Debug, Clone)]
+pub struct StatusSnapshot {
+    /// 仅反映底层扫描是否已经自然结束；
+    /// 任务级状态（queued/running/completed/failed/canceled）仍由服务层维护。
+    pub done: bool,
+    pub progress: ScanProgress,
+    /// 若底层扫描因 IO 等原因失败，这里给出摘要信息（例如 `ErrorKind` + 文本描述），
+    /// 供服务层映射为 JSON-RPC 错误码；具体结构在实现时可细化。
+    pub error: Option<String>,
 }
 
 /// Recursively scan `root` and return files with size >= `min_size` bytes,
