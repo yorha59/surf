@@ -40,6 +40,27 @@ struct JsonRpcRequest {
     #[serde(default)]
     id: Option<Value>,
 }
+/// 用于 `Surf.Scan` 方法的参数结构体（基于 Architecture.md 4.3.3）
+#[derive(Debug, Deserialize)]
+struct SurfScanParams {
+    /// 起始扫描根目录（必填）
+    path: String,
+    /// 最小文件大小阈值，字符串形式如 "100MB"（可选）
+    #[serde(default)]
+    min_size: Option<String>,
+    /// 并发扫描线程数（可选）
+    #[serde(default)]
+    threads: Option<usize>,
+    /// 结果 TopN 限制（可选）
+    #[serde(default)]
+    limit: Option<usize>,
+    /// 路径排除规则（可选）
+    #[serde(default)]
+    exclude_patterns: Option<Vec<String>>,
+    /// 客户端打标（可选）
+    #[serde(default)]
+    tag: Option<String>,
+}
 
 /// JSON-RPC 错误对象（对应 error 字段）
 #[derive(Debug, Serialize)]
