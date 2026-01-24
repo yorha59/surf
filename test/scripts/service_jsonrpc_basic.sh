@@ -238,5 +238,67 @@ if ! grep -q '"task_id"' "${STATUS_RESP_FILE}" || ! grep -q '"state"' "${STATUS_
   fail 1
 fi
 
-log "Surf.Scan + Surf.Status basic JSON-RPC flow passed"
+# Optionally wait a short while for the tiny scan to reach a
+# terminal state so that Surf.GetResults has a stable view.
+STATE="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "${STATUS_RESP_FILE}" | head -n1 | sed 's/.*:"//;s/"$//')"
+for _ in {1..10}; do
+  if [[ "${STATE}" == "completed" || "${STATE}" == "failed" || "${STATE}" == "canceled" ]]; then
+    break
+  fi
+
+  sleep 0.2
+  if ! send_jsonrpc "${JSON_STATUS_TASK}" "${STATUS_RESP_FILE}" "${TMP_DIR}/nc_status_task_retry.err"; then
+    log "ERROR: nc failed during Surf.Status(task_id) polling"
+    fail 1
+  fi
+  STATE="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "${STATUS_RESP_FILE}" | head -n1 | sed 's/.*:"//;s/"$//')"
+done
+
+log "Surf.Status(task_id) final state=${STATE}"
+
+# --- 3) Surf.GetResults for completed task (structure smoke check) ---
+
+if [[ "${STATE}" != "completed" ]]; then
+  log "ERROR: task did not reach completed state (state=${STATE})"
+  log "Surf.GetResults smoke check requires a completed task"
+  fail 1
+fi
+
+GET_RESULTS_RESP_FILE="${TMP_DIR}/resp_get_results.json"
+JSON_GET_RESULTS=$(cat <<EOF
+{"jsonrpc":"2.0","id":4,"method":"Surf.GetResults","params":{"task_id":"${TASK_ID}","mode":"flat","limit":10}}
+EOF
+)
+
+log "sending JSON-RPC Surf.GetResults for task_id=${TASK_ID}"
+if ! send_jsonrpc "${JSON_GET_RESULTS}" "${GET_RESULTS_RESP_FILE}" "${TMP_DIR}/nc_get_results.err"; then
+  log "ERROR: nc failed during Surf.GetResults request"
+  if [[ -s "${TMP_DIR}/nc_get_results.err" ]]; then
+    log "nc stderr (first 200 bytes):"
+    head -c 200 "${TMP_DIR}/nc_get_results.err" | sed 's/^/[service_jsonrpc_basic] /'
+    echo
+  fi
+  fail 1
+fi
+
+if [[ ! -s "${GET_RESULTS_RESP_FILE}" ]]; then
+  log "ERROR: empty response for Surf.GetResults"
+  fail 1
+fi
+
+if grep -q '"error"' "${GET_RESULTS_RESP_FILE}"; then
+  log "ERROR: Surf.GetResults returned error; snippet:"
+  head -c 200 "${GET_RESULTS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
+if ! grep -q '"result"' "${GET_RESULTS_RESP_FILE}"; then
+  log "ERROR: Surf.GetResults response missing result field; snippet:"
+  head -c 200 "${GET_RESULTS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
+log "Surf.Scan + Surf.Status + Surf.GetResults basic JSON-RPC flow passed"
 pass
