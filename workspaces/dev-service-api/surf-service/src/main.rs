@@ -1936,7 +1936,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
 
     println!(
-        "surf-service listening on {addr} (max_concurrent_scans={max}, task_ttl_seconds={ttl}).\nJSON-RPC service ready: Surf.Scan / Surf.Status / Surf.Cancel 已与 surf-core 进度感知扫描 API 打通（含任务登记与取消语义）；Surf.GetResults 及结果聚合/缓存接口仍待在后续迭代中实现。",
+        "surf-service listening on {addr} (max_concurrent_scans={max}, task_ttl_seconds={ttl}).\nJSON-RPC service ready: Surf.Scan / Surf.Status / Surf.Cancel / Surf.GetResults 已与 surf-core 进度感知扫描 API 与结果聚合打通（含任务登记、进度查询、取消与结果收集语义；并发上限与任务 TTL 仍作为后续增强项保留）。",
         addr = addr,
         max = args.max_concurrent_scans,
         ttl = args.task_ttl_seconds,

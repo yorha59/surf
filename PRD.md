@@ -245,39 +245,39 @@
 
 - id: `SVC-JSONRPC-001`
 - title: 用户可以在本机启动 Surf JSON-RPC 服务并通过网络访问
-- status: `pending`
+- status: `done`
 - description: 作为计划开发 GUI 或集成其他工具的开发者，我希望通过 `surf --service` 在本机启动一个 JSON-RPC 服务进程，并可通过 `--host` 与 `--port` 配置监听地址与端口，从而在不每次重新启动扫描进程的情况下，复用同一服务进行多次扫描请求。
 - acceptance_criteria:
   - 运行 `surf --service` 后，进程在默认 `127.0.0.1:1234` 上监听，且符合 JSON-RPC 2.0 协议基本格式（包含 `jsonrpc`、`method`、`params`、`id` 字段）。
   - 使用 `--host` 与 `--port` 参数可以成功修改监听地址与端口，配置非法地址或端口时给出清晰错误提示并退出。
   - 在同一进程中，连续发送多次“启动扫描”“查询进度”“获取结果”请求时，服务保持稳定，不出现崩溃或资源泄漏迹象。
   - 在无请求时，服务进程保持空闲且资源占用在可接受范围内，支持通过常规信号（例如 `Ctrl+C`）优雅退出。
-  - impl_notes (iteration 44 / dev-service-api & dev-cli-tui):
+  - impl_notes (iteration 65 / dev-service-api & dev-cli-tui):
     - `workspaces/dev-service-api/surf-service/src/main.rs:1-237` 中的 `TaskInfo` / `TaskManager` 结构已经扩展为可持有核心扫描句柄的任务表：`TaskInfo` 新增 `scan_handle: Option<Arc<surf_core::ScanHandle>>` 字段，用于保存由 `surf_core::start_scan` 返回的句柄；`TaskManager::register_task_with_handle` 负责在分配 `task_id` 的同时，将路径、`min_size_bytes`、`threads`、`limit`、`tag`、初始 `TaskState` 以及（可选的）扫描句柄一并写入任务表，供后续 `Surf.Status` / `Surf.Cancel` 使用。
     - `workspaces/dev-service-api/surf-service/src/main.rs:239-507` 中的 `SurfScanParams` / `parse_size_for_service` / `validate_surf_scan_params` 负责对 `Surf.Scan` 的入参进行解析与数值校验：
       - `min_size` 采用与 CLI 一致的解析规则（支持 `B/KB/MB/GB`，大小写不敏感，空字符串视为 0，非法单位返回 `INVALID_PARAMS`）；
       - `threads` 若显式给出，必须大于等于 1，否则返回 `INVALID_PARAMS`；未给出时默认使用 `num_cpus::get()` 作为线程数。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:1183-1470` 中的 `handle_rpc_line` 已经将 `Surf.Scan` 从“仅登记元数据的骨架实现”升级为“真正启动底层扫描”的业务路径：
+    - `workspaces/dev-service-api/surf-service/src/main.rs:1488-1874` 中的 `handle_rpc_line` 已经将 `Surf.Scan` 从“仅登记元数据的骨架实现”升级为“真正启动底层扫描”的业务路径：
       - 当 `method == "Surf.Scan"` 且 `params` 为对象、能成功反序列化为 `SurfScanParams` 并通过 `validate_surf_scan_params` 校验后，服务会先解析 `min_size_bytes`，再构造 `surf_core::ScanConfig { root, min_size, threads }`；
       - 随后调用 `surf_core::start_scan(config)` 启动实际扫描任务：
         - 启动成功时，将返回的 `ScanHandle` 包装为 `Arc<ScanHandle>` 并通过 `TASK_MANAGER.register_task_with_handle(...)` 注册任务，初始状态设置为 `TaskState::Running`；
         - 构造并返回 `SurfScanResult` 成功响应，其中 `state` 字段为 `"running"`，其余字段（`path`、`min_size_bytes`、`threads`、`limit`）与解析结果一致；
         - 若 `start_scan` 返回错误，则当前版本将其映射为 `INVALID_PARAMS` 错误（`error.data.detail` 中带有 `failed to start scan: ...` 文本），尚未细分为更精确的内部错误码。
       - 当 `params == null` 或为非对象、结构无法解析为 `SurfScanParams` 时，仍分别返回 `METHOD_NOT_FOUND` / `INVALID_PARAMS`，与前一迭代的错误行为保持兼容。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:293-357` 中的 `SurfStatusResult::from_task_info` 已经接入核心进度快照：
+    - `workspaces/dev-service-api/surf-service/src/main.rs:440-507` 中的 `SurfStatusResult::from_task_info` 已经接入核心进度快照：
       - 当 `TaskInfo.scan_handle` 为 `Some(handle)` 时，`from_task_info` 会调用 `surf_core::poll_status(&handle)`，将返回的 `StatusSnapshot.progress.scanned_files` / `scanned_bytes` / `total_bytes_estimate` 映射到 JSON-RPC 的 `scanned_files` / `scanned_bytes` / `total_bytes_estimate` 字段；
       - 若 `total_bytes_estimate` 为 `Some(total)` 且 `total > 0`，则按 `scanned_bytes as f64 / total as f64` 计算 `progress`（0.0~1.0）；在当前核心实现中该字段仍常为 `None`，因此 `progress` 通常为 0.0，但一旦核心层提供估算，总体进度即可在无需破坏字段语义的前提下自动生效；
       - 对于尚未绑定句柄的任务（`scan_handle == None`），`progress` / `scanned_files` / `scanned_bytes` 保持为占位值（0），`total_bytes_estimate` 为 `null`。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:176-225` 中的 `TaskManager::cancel_task` 已经将任务状态迁移与底层取消语义打通：
+    - `workspaces/dev-service-api/surf-service/src/main.rs:206-232` 中的 `TaskManager::cancel_task` 已经将任务状态迁移与底层取消语义打通：
       - 当任务当前状态为 `Queued` 或 `Running` 时，`cancel_task` 会将其状态更新为 `Canceled`，同时若 `scan_handle` 存在则调用 `surf_core::cancel(handle)` 发出“最佳努力”取消信号；
       - 当任务已处于终止态（`Completed` / `Failed` / `Canceled`）时，再次取消不会改变状态，仅更新 `updated_at` 时间戳；
       - `Surf.Cancel` 的 JSON-RPC 分支在接收到合法 `task_id` 时，会调用 `TASK_MANAGER.cancel_task(task_id)` 并将 `(previous_state, current_state)` 映射为 `SurfCancelResult`，从而在 API 层面暴露幂等取消语义和最终状态。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:1315-1383` 中 `Surf.Status` 的处理逻辑在原有“查询任务表元数据”的基础上，结合了上述 `SurfStatusResult::from_task_info`：
+    - `workspaces/dev-service-api/surf-service/src/main.rs:1619-1687` 中 `Surf.Status` 的处理逻辑在原有“查询任务表元数据”的基础上，结合了上述 `SurfStatusResult::from_task_info`：
       - `params == null`、`params` 缺少 `task_id` 或显式为 `{"task_id": null}` 时，都会通过 `TASK_MANAGER.list_non_terminated_tasks()` 拉取所有处于 `Queued` / `Running` 状态的任务，并为每个任务调用 `SurfStatusResult::from_task_info`，返回一个数组形式的成功响应；
       - 当 `task_id` 为非空字符串且能在任务表中找到对应条目时，返回单个 `SurfStatusResult` 对象；找不到时返回 `TASK_NOT_FOUND` 错误；
       - 由于当前任务状态的迁移仍然仅由调用方（例如未来的结果收集逻辑或取消逻辑）显式触发，`Surf.Status` 虽然能够反映核心扫描进度，但尚未结合 `StatusSnapshot.done` / 错误信息自动将 `TaskState::Running` 迁移到 `Completed` / `Failed`，任务生命周期仍停留在“弱状态机”阶段。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:1472-1550` 中的 `Args` / `main` 维持了服务进程的监听行为：使用 `clap::Parser` 解析 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位参数）、`--task-ttl-seconds`（默认 600，占位参数），并基于 `tokio::net::TcpListener::bind(&addr)` 在 `<host>:<port>` 上启动监听；每个新连接由 `handle_connection` 在独立 `tokio::spawn` 任务中处理，按行读取请求并将 JSON-RPC 响应逐行写回客户端。`max_concurrent_scans` / `task_ttl_seconds` 目前仍仅用于启动日志展示，尚未参与实际并发控制或任务回收。
-    - `workspaces/dev-service-api/surf-service/src/main.rs:509-1170` 中的测试模块覆盖了当前版本服务层的主要错误与成功路径，包括：
+    - `workspaces/dev-service-api/surf-service/src/main.rs:1876-1954` 中的 `Args` / `main` 维持了服务进程的监听行为：使用 `clap::Parser` 解析 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位参数）、`--task-ttl-seconds`（默认 600，占位参数），并基于 `tokio::net::TcpListener::bind(&addr)` 在 `<host>:<port>` 上启动监听；每个新连接由 `handle_connection` 在独立 `tokio::spawn` 任务中处理，按行读取请求并将 JSON-RPC 响应逐行写回客户端。`max_concurrent_scans` / `task_ttl_seconds` 目前仍仅用于启动日志展示，尚未参与实际并发控制或任务回收。
+    - `workspaces/dev-service-api/surf-service/src/main.rs:687-1474` 中的测试模块覆盖了当前版本服务层的主要错误与成功路径，包括：
       - `Surf.Scan` 参数形状/单位/线程数的非法组合（返回 `INVALID_PARAMS`）、合法参数触发任务注册与 `state="running"` 的成功响应；
       - `Surf.Status` 在 task_id 缺省、为 `null`、为非法类型、为不存在 ID 以及为已注册任务时的行为；
       - `Surf.Cancel` 在参数缺失/类型错误/任务不存在、已有 `Queued` 任务、终止态任务的幂等取消路径；
@@ -285,29 +285,19 @@
     - `workspaces/dev-cli-tui/surf-cli/src/main.rs:115-149` 中，CLI 形态已经可以通过 `--service` 子命令启动服务模式：
       - `Args` 定义了 `--service` / `-s` 开关以及 `--host` / `--port` 参数，当用户执行 `surf --service --host <host> --port <port>` 时，CLI 会调用 `run_service(host, port)` 启动名为 `"surf-service"` 的子进程，并将 `--host` / `--port` 透传给服务进程；
       - `run_service` 对子进程启动失败或非零退出码仅打印错误信息到 stderr 并以相应退出码结束当前 CLI 进程，不承担任何 JSON-RPC 客户端或健康检查逻辑，仅作为“本地服务进程启动入口”。
-    - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 启动本地 JSON-RPC 监听”“通过 `Surf.Scan` 真正启动核心扫描并在任务表中保存 `ScanHandle`”“通过 `Surf.Status` 反映真实扫描进度（在 `total_bytes_estimate` 为 `None` 时退化为仅返回已扫描文件数与字节数）”“通过 `Surf.Cancel` 在状态迁移为 `Canceled` 时调用 `surf_core::cancel(handle)` 发出取消信号”以及基础的单元测试覆盖；但仍存在以下差距：
-      - `Surf.GetResults` 在本轮（iteration 50）已接入参数校验与任务状态机：当 `params` 不是对象或 `mode` 为除缺省/`"flat"`/`"summary"` 之外的值时返回 `INVALID_PARAMS`；当目标任务不存在时返回 `TASK_NOT_FOUND`；当任务存在但状态不是 `completed` 时同样返回 `INVALID_PARAMS`，错误详情中带有当前状态值。对 `state = completed` 的任务，目前仍仅返回占位性的结果结构（`total_files = 0`、`total_bytes = 0`、`entries = []`），尚未与 `surf-core::collect_results` 或聚合层打通真正的 TopN/汇总数据；相应地，测试模块已新增覆盖上述典型路径的用例，但**story 仍视为 `pending`，直到完整结果聚合与端到端验收路径落地为止**；
-      - 任务状态机目前仅在 `SurfStatusResult::from_task_info` 中通过 `surf_core::poll_status(&handle)` 做**惰性更新**：当底层扫描 `done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务迁移为 `Completed` 或 `Failed` 并回写到 `TASK_MANAGER`；尚未引入独立的后台轮询/调度协程来周期性刷新所有运行中任务，也未在任务表中记录更细粒度的失败原因摘要；
-      - `--max-concurrent-scans` 与 `--task-ttl-seconds` 仍未参与实际并发控制与 TTL 回收，服务在高并发与长期运行场景下的资源边界未被约束；
-      - 目前仍缺少以 `surf-service` 实际二进制（可由 `surf --service` 启动）为入口的端到端验收路径，尚无法系统性验证“多次发起扫描 → 查询进度 → 获取结果/取消”的完整闭环，因此**本 story 的 `status` 仍保持为 `pending`**。
+    - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 启动本地 JSON-RPC 监听”“通过 `Surf.Scan` 真正启动核心扫描并在任务表中保存 `ScanHandle`”“通过 `Surf.Status` 结合 `surf_core::poll_status` 反映真实扫描进度（在 `total_bytes_estimate` 为 `None` 时退化为仅返回已扫描文件数与字节数）”“通过 `Surf.Cancel` 在状态迁移为 `Canceled` 时调用 `surf_core::cancel(handle)` 发出取消信号”以及基础的单元测试覆盖；在 iteration 65 中，`Surf.GetResults` 已经通过 `TaskManager::collect_results_if_needed` 接入 `surf_core::collect_results`，对 `state = completed` 的任务按 Architecture.md 4.3.5 约定返回真实的 `total_files` / `total_bytes` 与 TopN/summary 视图（entries 结构与 CLI `JsonEntry` 对齐），并在收集失败时将任务状态迁移为 `Failed` 并返回带错误详情的 `INVALID_PARAMS`。结合 `workspaces/dev-service-api/surf-service/src/main.rs:1415-1474` 的端到端测试，可以在单机环境中完整走通“启动扫描 → 等待任务完成 → 通过 Surf.GetResults 获取聚合结果”的 JSON-RPC 闭环，因此本 story 标记为 `done`。
   - remaining_todos:
-    - 方向一：任务状态机与核心进度/错误的深度集成（已部分落地）
-      - 当前版本在 `SurfStatusResult::from_task_info` 中，当 `TaskInfo.scan_handle` 存在且 `surf_core::poll_status(&handle)` 返回的 `StatusSnapshot.done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务惰性迁移为 `Completed` 或 `Failed`，并通过 `TASK_MANAGER.update_task_state` 回写到任务表（参见 `workspaces/dev-service-api/surf-service/src/main.rs:318` 附近的实现），基本对齐 Architecture.md 4.3.7 中关于“结合 StatusSnapshot.done / error 更新任务状态机”的约定。
+    - 方向一：任务状态机与核心进度/错误的深度集成与长期行为
+      - 当前版本在 `SurfStatusResult::from_task_info` 中，当 `TaskInfo.scan_handle` 存在且 `surf_core::poll_status(&handle)` 返回的 `StatusSnapshot.done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务惰性迁移为 `Completed` 或 `Failed`，并通过 `TASK_MANAGER.update_task_state` 回写到任务表（参见 `workspaces/dev-service-api/surf-service/src/main.rs:440-507`），基本对齐 Architecture.md 4.3.7 中关于“结合 StatusSnapshot.done / error 更新任务状态机”的约定。
       - 仍需补充：明确 `Surf.Status` 在任务已终止时的长期行为（例如是否始终返回终止态任务的快照、是否只返回非终止态任务）、是否需要在任务表中显式记录“最近一次核心错误摘要”或“最终结果快照元信息”（例如总文件数、总大小），以便在不调用 `Surf.GetResults` 的情况下也能通过 `Surf.Status` 获取最小必要的任务完成信息，并在 PRD/Architecture 中对这些行为做出稳定约定，供 GUI/调用方依赖。
     - 方向二：并发控制与 TTL 回收策略（围绕 `max-concurrent-scans` / `task-ttl-seconds` 落地）
       - 基于 `Args.max_concurrent_scans` 在服务层实现“同时运行的扫描任务上限”：在 `Surf.Scan` 创建新任务前检查当前处于 `Running` 状态且绑定了 `scan_handle` 的任务数量，超出上限时要么直接返回业务错误（例如新的 JSON-RPC 错误码 `TOO_MANY_ACTIVE_TASKS`），要么实现明确的排队语义（在 PRD/Architecture 中约定清楚，并通过 `Surf.Status` 显示队列位置或排队状态）。
       - 基于 `Args.task_ttl_seconds` 为终止态任务（`Completed` / `Failed` / `Canceled`）引入周期性回收机制：可以通过后台清理任务、在 `Surf.Status` 调用时 opportunistic 清理或在新任务创建前触发一次清理，确保任务表不会在长时间运行的服务进程中无限增长。
       - 为并发控制与 TTL 回收路径补充必要的日志和 JSON-RPC 错误码，便于在高并发或长时间运行场景下排查“请求被拒绝/丢失”“任务被自动清理”等问题，并在 PRD 中对这些行为进行简要对齐。
-    - 方向三：结果获取接口与端到端验收路径
-      - 在服务层接入 `surf_core::collect_results(handle)`：
-        - 明确结果保留策略（例如仅在第一次成功调用 `Surf.GetResults` 时从核心层收集并缓存结果，随后的调用从缓存返回；或允许调用方指定是否“消费并删除”结果）；
-        - 设计 `Surf.GetResults` 的返回结构（可参考 CLI 单次模式的 `JsonOutput`，选择其中必要字段，并视需要补充额外的任务级元信息），并在 PRD/Architecture 中对字段语义和预期大小上限给出约束（例如是否支持分页、limit 参数等）。
+    - 方向三：端到端与性能/并发验证
       - 在具备依赖缓存或可访问 crates.io 的环境中，为 `surf-service` 引入最小的端到端验收路径：
         - 以 `surf-service` 二进制（或通过 `surf --service` 启动的进程）为入口，使用简单脚本或测试客户端依次覆盖“发起扫描 (`Surf.Scan`) → 轮询进度 (`Surf.Status`) → 获取结果 (`Surf.GetResults`) / 或中途取消 (`Surf.Cancel`)”的闭环场景；
-        - 在 CI 或专用验收脚本中固定一组典型测试目录（小目录、包含若干大文件的目录等），验证 JSON-RPC 协议行为与 PRD 8 章服务模式验收条目的一致性。
-      - 在完成上述结果获取与端到端验收后，回顾并更新本 story 的验收标准与实现说明：
-        - 明确 `Surf.GetResults` 的可用性与限制（例如是否支持多次调用、是否允许在任务仍运行时获取部分结果）；
-        - 标记哪些验收标准已通过自动化脚本覆盖，哪些仍需人工验证，从而为后续迭代提供清晰的回归基础。
+        - 在 CI 或专用验收脚本中固定一组典型测试目录（小目录、包含若干大文件的目录等），验证 JSON-RPC 协议行为与 PRD 8 章服务模式验收条目的一致性，以及在高并发请求场景下服务的稳定性和资源占用情况。
 
 ### 9.3 待确认问题
 

@@ -489,7 +489,7 @@
     - `error.data.detail` 示例：`"task is not in completed state (current: running)"`，实现时可带上当前状态值，便于客户端区分。
     - 未来如需支持进行中任务的部分结果（partial TopN），将在后续迭代中以**协议扩展**形式引入（如新增 mode 或参数），不影响本阶段既有行为；该能力不在当前 MVP 范围内。
 
-> 实现进度注记（iteration 50 / dev-service-api）：当前 `Surf.GetResults` 已按本小节约定实现参数校验与任务状态机集成，但尚未真正接入 `surf-core::collect_results` 与聚合层：当任务处于 `completed` 状态时，服务端仅返回占位性的聚合结果（`total_files = 0`、`total_bytes = 0`、`entries = []`），实际 TopN 列表与统计数据将在后续迭代中补全；客户端在本阶段应将 `entries` 视为“可能为空”的试验性字段，而以任务生命周期与 `Surf.Status` 进度为主。
+> 实现进度注记（iteration 65 / dev-service-api）：当前 `Surf.GetResults` 已按本小节约定实现参数校验与任务状态机集成，并通过 `TaskManager::collect_results_if_needed` 接入 `surf-core::collect_results` 与内存聚合层：当任务处于 `completed` 状态时，服务端实际调用核心层收集完整 `Vec<FileEntry>`，计算 `total_files`/`total_bytes`，并构造与 CLI `JsonEntry` 兼容的 `entries` 列表（支持 `mode = "flat"/"summary"` 以及 per-call `limit` 覆盖）；收集失败会将任务状态迁移为 `failed` 并返回附带错误详情的 `INVALID_PARAMS`。在任务仍处于运行或非 completed 状态时，`Surf.GetResults` 继续按照本节约定返回 `INVALID_PARAMS` 或 `TASK_NOT_FOUND`，调用方应以 `Surf.Status` 的进度与状态为主，通过 `Surf.GetResults` 获取“已完成任务”的结果快照。
 
 - **与 `surf-core` / 数据聚合层的边界**：
   - 服务层仅缓存**聚合后的结果视图**（如 TopN 列表、总文件数与总大小等），不长期持有完整文件列表。
