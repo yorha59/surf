@@ -320,14 +320,42 @@ impl SurfStatusResult {
     ///
     /// 当前尚未集成 surf-core 的进度快照，因此进度字段统一使用占位值。
     fn from_task_info(task_id: &str, info: TaskInfo) -> Self {
+        // 默认使用当前 TaskState 作为返回状态；对于 Running 任务，在
+        // 关联了扫描句柄且底层扫描已结束时，根据核心快照将其惰性迁移为
+        // Completed/Failed，并同步回 TASK_MANAGER（与 Architecture.md 4.3.7
+        // 中“结合 StatusSnapshot.done / error 更新任务状态机”的约定对齐）。
+
+        let mut effective_state = info.state;
+
         // 如果有扫描句柄，查询真实进度
         let (progress, scanned_files, scanned_bytes, total_bytes_estimate) = match info.scan_handle {
             Some(handle) => {
                 let snapshot = surf_core::poll_status(&handle);
+
+                // 根据快照惰性推进任务状态：仅当任务当前处于 Running
+                // 且底层扫描已结束时，才根据 error 与否迁移到
+                // Completed/Failed；Queued/Completed/Failed/Canceled 保持不变。
+                if snapshot.done {
+                    match info.state {
+                        TaskState::Running => {
+                            effective_state = if snapshot.error.is_some() {
+                                TaskState::Failed
+                            } else {
+                                TaskState::Completed
+                            };
+
+                            // 尝试同步更新全局任务表中的状态；若互斥锁异常
+                            // 或任务在此期间被删除，则忽略更新失败。
+                            let _ = TASK_MANAGER.update_task_state(task_id, effective_state);
+                        }
+                        _ => { /* 其他状态不在此处修改 */ }
+                    }
+                }
+
                 let scanned_files = snapshot.progress.scanned_files;
                 let scanned_bytes = snapshot.progress.scanned_bytes;
                 let total_bytes_estimate = snapshot.progress.total_bytes_estimate;
-                // 计算进度百分比（0.0-1.0），如果总字节数未知则返回0.0
+                // 计算进度百分比（0.0-1.0），如果总字节数未知则返回 0.0
                 let progress = match total_bytes_estimate {
                     Some(total) if total > 0 => scanned_bytes as f64 / total as f64,
                     _ => 0.0,
@@ -339,7 +367,7 @@ impl SurfStatusResult {
 
         SurfStatusResult {
             task_id: task_id.to_string(),
-            state: match info.state {
+            state: match effective_state {
                 TaskState::Queued => "queued".to_string(),
                 TaskState::Running => "running".to_string(),
                 TaskState::Completed => "completed".to_string(),
