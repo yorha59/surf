@@ -3,6 +3,10 @@ use tokio::net::TcpListener;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::collections::HashMap;
+use std::sync::{Mutex};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（骨架实现）。
 ///
@@ -26,6 +30,118 @@ const SUPPORTED_METHODS: [&str; 4] = [
     "Surf.GetResults",
     "Surf.Cancel",
 ];
+
+/// 扫描任务状态枚举，对齐 Architecture.md 4.3.1 中的任务状态机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// 单个扫描任务的元数据信息快照。
+///
+/// 当前仅在内存中维护这些字段，用于后续实现 `Surf.Status` / `Surf.GetResults`
+/// 时作为基础信息来源；尚未与 `surf-core` 的进度快照或结果结构体打通。
+#[derive(Debug, Clone)]
+struct TaskInfo {
+    /// 起始扫描路径（与 Surf.Scan.params.path 一致）。
+    path: String,
+    /// 解析后的最小文件大小阈值（字节）。
+    min_size_bytes: u64,
+    /// 扫描线程数。
+    threads: usize,
+    /// TopN 限制（可选，对应 Surf.Scan.params.limit）。
+    limit: Option<usize>,
+    /// 客户端打标（可选）。
+    tag: Option<String>,
+    /// 任务创建时间（Unix 秒）。
+    started_at: u64,
+    /// 最近一次状态更新的时间（Unix 秒）。
+    updated_at: u64,
+    /// 当前任务状态（queued/running/completed/failed/canceled）。
+    state: TaskState,
+}
+
+/// 内存中的简单任务管理器骨架。
+///
+/// - 当前仅负责分配任务 ID 并记录 `TaskInfo` 元数据；
+/// - 后续迭代会在此基础上补充对 `surf-core::ScanHandle` 的持有与进度快照，
+///   以便真正实现 Architecture.md 4.3.7 所描述的任务生命周期与 `Surf.Status` 映射。
+#[derive(Debug, Default)]
+struct TaskManager {
+    inner: Mutex<HashMap<String, TaskInfo>>,
+}
+
+/// 全局递增任务 ID 计数器，用于生成简单的字符串 task_id（"1"、"2"...）。
+static TASK_ID_SEQ: AtomicU64 = AtomicU64::new(1);
+
+impl TaskManager {
+    /// 创建一个空的任务管理器实例。
+    fn new() -> Self {
+        TaskManager {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 分配一个新的任务 ID。
+    ///
+    /// 当前实现采用进程内递增数字字符串，后续可以无损演进为 UUID 等形式。
+    fn next_task_id(&self) -> String {
+        let id = TASK_ID_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+        id.to_string()
+    }
+
+    /// 注册一个新的任务元数据，并返回分配的 task_id。
+    ///
+    /// 该方法目前只记录基础字段和初始状态，不涉及 `surf-core` 的扫描句柄；
+    /// 在后续实现 `Surf.Scan` 业务逻辑时，可在调用处先启动实际扫描任务，
+    /// 再将相关配置与状态信息一起写入 `TaskInfo`。
+    fn register_task(
+        &self,
+        path: String,
+        min_size_bytes: u64,
+        threads: usize,
+        limit: Option<usize>,
+        tag: Option<String>,
+        state: TaskState,
+    ) -> String {
+        let task_id = self.next_task_id();
+        let now = current_unix_timestamp();
+        let info = TaskInfo {
+            path,
+            min_size_bytes,
+            threads,
+            limit,
+            tag,
+            started_at: now,
+            updated_at: now,
+            state,
+        };
+
+        let mut inner = self.inner.lock().expect("TaskManager mutex poisoned");
+        inner.insert(task_id.clone(), info);
+        task_id
+    }
+
+    /// 读取某个任务的元数据快照。
+    ///
+    /// 返回值为克隆的 `TaskInfo`，避免在调用方持有互斥锁。
+    fn get_task_info(&self, task_id: &str) -> Option<TaskInfo> {
+        let inner = self.inner.lock().ok()?;
+        inner.get(task_id).cloned()
+    }
+}
+
+/// 获取当前 Unix 时间戳（秒）。
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+        .as_secs()
+}
 
 /// JSON-RPC 2.0 请求结构（宽松解析，允许 params 为任意 JSON 值）
 #[derive(Debug, Deserialize)]
@@ -555,6 +671,53 @@ mod tests {
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
         assert!(detail.contains("task_id not found: non-existent"));
         assert_eq!(parsed["id"], 5);
+    }
+
+    #[test]
+    fn task_manager_registers_tasks_and_generates_incrementing_ids() {
+        let manager = TaskManager::new();
+
+        let id1 = manager.register_task(
+            "/path/one".to_string(),
+            1024,
+            4,
+            Some(10),
+            Some("tag-one".to_string()),
+            TaskState::Queued,
+        );
+
+        let id2 = manager.register_task(
+            "/path/two".to_string(),
+            2048,
+            8,
+            None,
+            None,
+            TaskState::Running,
+        );
+
+        assert_ne!(id1, id2, "task ids should be unique");
+
+        let info1 = manager.get_task_info(&id1).expect("task id1 should exist");
+        assert_eq!(info1.path, "/path/one");
+        assert_eq!(info1.min_size_bytes, 1024);
+        assert_eq!(info1.threads, 4);
+        assert_eq!(info1.limit, Some(10));
+        assert_eq!(info1.tag.as_deref(), Some("tag-one"));
+        assert_eq!(info1.state, TaskState::Queued);
+
+        let info2 = manager.get_task_info(&id2).expect("task id2 should exist");
+        assert_eq!(info2.path, "/path/two");
+        assert_eq!(info2.min_size_bytes, 2048);
+        assert_eq!(info2.threads, 8);
+        assert_eq!(info2.limit, None);
+        assert_eq!(info2.tag, None);
+        assert_eq!(info2.state, TaskState::Running);
+
+        // started_at / updated_at 为时间戳，应该大于 0
+        assert!(info1.started_at > 0);
+        assert!(info1.updated_at >= info1.started_at);
+        assert!(info2.started_at > 0);
+        assert!(info2.updated_at >= info2.started_at);
     }
 }
 
