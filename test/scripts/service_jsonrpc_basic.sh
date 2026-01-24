@@ -249,6 +249,23 @@ if ! grep -q '"task_id"' "${STATUS_RESP_FILE}" || ! grep -q '"state"' "${STATUS_
   fail 1
 fi
 
+# Minimal structural check for progress fields as per Architecture.md 4.3.4/4.3.7
+if ! grep -q '"scanned_files"' "${STATUS_RESP_FILE}" \
+   || ! grep -q '"scanned_bytes"' "${STATUS_RESP_FILE}"; then
+  log "ERROR: Surf.Status(task_id) missing scanned_files/scanned_bytes fields; snippet:"
+  head -c 200 "${STATUS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
+# total_bytes_estimate 可以为 null，但字段应当存在
+if ! grep -q '"total_bytes_estimate"' "${STATUS_RESP_FILE}"; then
+  log "ERROR: Surf.Status(task_id) missing total_bytes_estimate field; snippet:"
+  head -c 200 "${STATUS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
 # Optionally wait a short while for the tiny scan to reach a
 # terminal state so that Surf.GetResults has a stable view.
 STATE="$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "${STATUS_RESP_FILE}" | head -n1 | sed 's/.*:"//;s/"$//')"
@@ -306,6 +323,22 @@ fi
 
 if ! grep -q '"result"' "${GET_RESULTS_RESP_FILE}"; then
   log "ERROR: Surf.GetResults response missing result field; snippet:"
+  head -c 200 "${GET_RESULTS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
+# Result object should expose aggregated fields and entries list
+if ! grep -q '"total_files"' "${GET_RESULTS_RESP_FILE}" \
+   || ! grep -q '"total_bytes"' "${GET_RESULTS_RESP_FILE}"; then
+  log "ERROR: Surf.GetResults response missing total_files/total_bytes fields; snippet:"
+  head -c 200 "${GET_RESULTS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
+  echo
+  fail 1
+fi
+
+if ! grep -q '"entries"' "${GET_RESULTS_RESP_FILE}"; then
+  log "ERROR: Surf.GetResults response missing entries field; snippet:"
   head -c 200 "${GET_RESULTS_RESP_FILE}" | sed 's/^/[service_jsonrpc_basic] /'
   echo
   fail 1
