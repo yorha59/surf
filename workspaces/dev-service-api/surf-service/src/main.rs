@@ -10,13 +10,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
 use num_cpus;
 
-/// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（骨架实现）。
+/// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（当前为「增强骨架实现」）。
 ///
-/// 当前版本仅完成：
-/// - 命令行参数解析（host/port 等），与 PRD / Architecture 中的约定对齐；
-/// - 启动一个 TCP 监听并接受连接；
-/// - 对每一行 JSON-RPC 请求做基础校验，并对未实现/未知方法返回标准错误响应；
-/// - 通过日志输出提示该服务仍处于骨架阶段。
+/// 当前版本已经具备：
+/// - 命令行参数解析（host/port/max-concurrent-scans/task-ttl-seconds 等），与 PRD / Architecture 中的约定对齐；
+/// - 启动 TCP 监听并按连接拆分异步任务，按行读取 JSON-RPC 请求；
+/// - 对所有 JSON-RPC 请求做结构与版本校验，统一使用 JSON-RPC 2.0 错误模型；
+/// - 针对 `Surf.Scan`：解析/校验参数（含 `min_size` 单位与 `threads` 下限），在内存中登记任务元数据并返回 `task_id` 与 `queued` 状态；
+/// - 针对 `Surf.Status`：支持查询单个任务或列出所有处于非终止态（queued/running）的任务，返回最小可用的进度占位信息；
+/// - 针对 `Surf.Cancel`：校验 `task_id` 并基于内存任务表执行幂等取消语义；
+/// - 对于 `Surf.GetResults` 以及与 `surf-core` 的实际扫描/进度/结果集成仍未实现，当前仅提供错误模型与任务元数据骨架。
 ///
 /// 参数结构体 `Args` 的 Clap 属性定义见文件靠后的 `struct Args`。
 /// JSON-RPC 2.0 标准错误码（部分）
@@ -1469,11 +1472,11 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("{}:{}", args.host, args.port);
 
-    // 绑定 TCP 监听，后续将基于此实现 JSON-RPC 2.0 协议。
+    // 绑定 TCP 监听，基于行分隔 JSON 实现 JSON-RPC 2.0 协议骨架。
     let listener = TcpListener::bind(&addr).await?;
 
     println!(
-        "surf-service listening on {addr} (max_concurrent_scans={max}, task_ttl_seconds={ttl}).\nJSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet; this binary currently serves as a service skeleton.",
+        "surf-service listening on {addr} (max_concurrent_scans={max}, task_ttl_seconds={ttl}).\nJSON-RPC skeleton ready: Surf.Scan / Surf.Status / Surf.Cancel 已提供参数校验与内存任务管理；Surf.GetResults 以及与 surf-core 的真正扫描与结果集成仍待实现。",
         addr = addr,
         max = args.max_concurrent_scans,
         ttl = args.task_ttl_seconds,
