@@ -146,6 +146,28 @@ impl TaskManager {
         let info = inner.get_mut(task_id)?;
         let previous_state = info.state;
         info.state = new_state;
+       info.updated_at = current_unix_timestamp();
+       // 返回克隆，避免持有锁
+       Some((previous_state, info.clone()))
+   }
+
+    /// 取消指定任务，遵循 Architecture.md 4.3.6 的幂等性约定。
+    ///
+    /// - 若任务不存在，返回 `None`；
+    /// - 若任务存在：
+    ///   - 若当前状态为 `Queued` 或 `Running`，则将其状态更新为 `Canceled`；
+    ///   - 若当前状态已是终止态（`Completed` / `Failed` / `Canceled`），则状态保持不变；
+    ///   - 无论状态是否改变，`updated_at` 都会更新为当前时间戳（表示最近一次操作时间）；
+    ///   - 返回 `(previous_state, updated_info)` 元组。
+    fn cancel_task(&self, task_id: &str) -> Option<(TaskState, TaskInfo)> {
+        let mut inner = self.inner.lock().ok()?;
+        let info = inner.get_mut(task_id)?;
+        let previous_state = info.state;
+        let new_state = match previous_state {
+            TaskState::Queued | TaskState::Running => TaskState::Canceled,
+            TaskState::Completed | TaskState::Failed | TaskState::Canceled => previous_state,
+        };
+        info.state = new_state;
         info.updated_at = current_unix_timestamp();
         // 返回克隆，避免持有锁
         Some((previous_state, info.clone()))
@@ -1079,36 +1101,36 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                     // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
                     let detail = format!("params must be a JSON object for method {}", method);
                     JsonRpcError::invalid_params(Some(detail))
-                } else {
-                    // params 为对象，检查 task_id 字段
-                    let obj = req.params.as_object().unwrap();
-                    match obj.get("task_id") {
-                        None => {
-                            // 缺少 task_id -> INVALID_PARAMS
-                            let detail = "task_id must be a non-empty string".to_string();
-                            JsonRpcError::invalid_params(Some(detail))
-                        }
-                        Some(v) => {
-                            if v.is_string() {
-                                let task_id_str = v.as_str().unwrap();
-                                if task_id_str.is_empty() {
-                                    // 空字符串视为无效参数
-                                    let detail = "task_id must be a non-empty string".to_string();
-                                    JsonRpcError::invalid_params(Some(detail))
-                                } else {
-                                    // 当前尚未实现任务管理器：任何非空字符串一律视为不存在任务
-                                    let detail = format!("task_id not found: {}", task_id_str);
-                                    JsonRpcError::task_not_found(Some(detail))
-                                }
-                            } else {
-                                // task_id 既不是 string 也不是 null -> INVALID_PARAMS
-                                let detail = "task_id must be a string".to_string();
-                                JsonRpcError::invalid_params(Some(detail))
-                            }
-                        }
-                    }
-                }
-            }
+               } else {
+                   // params 为对象，检查 task_id 字段
+                   let obj = req.params.as_object().unwrap();
+                   match obj.get("task_id") {
+                       None => {
+                           // 缺少 task_id -> INVALID_PARAMS
+                           let detail = "task_id must be a non-empty string".to_string();
+                           JsonRpcError::invalid_params(Some(detail))
+                       }
+                       Some(v) => {
+                           if v.is_string() {
+                               let task_id_str = v.as_str().unwrap();
+                               if task_id_str.is_empty() {
+                                   // 空字符串视为无效参数
+                                   let detail = "task_id must be a non-empty string".to_string();
+                                   JsonRpcError::invalid_params(Some(detail))
+                              } else {
+                                  // 当前尚未实现任务管理器：任何非空字符串一律视为不存在任务
+                                  let detail = format!("task_id not found: {}", task_id_str);
+                                  JsonRpcError::task_not_found(Some(detail))
+                              }
+                          } else {
+                               // task_id 既不是 string 也不是 null -> INVALID_PARAMS
+                               let detail = "task_id must be a string".to_string();
+                               JsonRpcError::invalid_params(Some(detail))
+                           }
+                       }
+                   }
+               }
+           }
             // 其他支持的方法当前仍仅作为骨架存在：无论是否携带 params，一律返回 METHOD_NOT_FOUND
             _ => {
                 JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
