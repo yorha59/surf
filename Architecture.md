@@ -141,13 +141,13 @@
       - 可在聚合层/服务层中额外扩展 `file_type`、`modified_at` 等字段，但这些字段应从更完整的核心结果或聚合结构中推导，而不是在各前端（CLI/GUI）中各自发明。
 
 - **与上层模块的契约（CLI 单次运行 & 服务层任务管理）**：
-  - CLI 单次运行模式（One-off）调用约定（区分“当前实现”与“进度感知目标形态”）：
-    - **当前已实现路径（iteration ≤ 14）**：
+  - CLI 单次运行模式（One-off）调用约定（区分“历史同步实现”与“当前进度感知实现”）：
+    - **历史同步实现路径（iteration ≤ 14）**：
       - CLI 以同步方式调用 `scan(&path, min_size_bytes, threads)`，等待结果返回：
         - 成功时，根据 `--json` 决定走 JsonOutput 序列化或表格打印路径；
         - 失败时，进度指示器由 CLI 层负责清理，错误文案基于 `std::io::Error` 直接渲染到 stderr，并以非零状态码退出，不输出部分结果。
-      - 进度指示器当前仅为简单的 spinner（`"Scanning <path> ..."`），**尚未展示已扫描文件数与已扫描总大小**，即仍然未满足 PRD 9.1.1 中对进度条内容的完整要求。
-    - **进度感知目标形态（本节新增架构设计，尚未在代码中落地）**：
+      - 进度指示器在该历史路径下仅为简单的 spinner（`"Scanning <path> ..."`），不展示已扫描文件数与已扫描总大小。
+    - **当前进度感知实现（已在 `surf-core` 与 `surf-cli` 中部分落地，仍有待完善）**：
       - 在保持 `scan(...)` 作为向后兼容同步 API 的前提下，核心层提供一组额外的进度感知抽象，供 CLI 与服务层复用：
 
         ```rust
@@ -201,7 +201,7 @@
     - 在扫描结束后，服务层调用 `collect_results(handle)` 获取完整 `Vec<FileEntry>`，再委托数据聚合层构造 `AggregatedResult` 并挂载到任务上，供 `Surf.GetResults` 使用；`AggregatedResult.entries` 与 CLI `JsonEntry` 保持字段/语义对齐。
     - 对于取消场景，服务层调用 `cancel(&handle)` 尝试中断底层遍历，同时将任务状态迁移为 `canceled`；无论底层是否能立即终止，后续 `Surf.Status` / `Surf.GetResults` 均以服务层状态机为主，核心层仅提供尽力而为的取消信号。
 
-> 以上进度感知 API（`ScanConfig` / `ScanProgress` / `StatusSnapshot` / `ScanHandle` 及其方法）为本次迭代新增的**架构级设计**，尚未在 `surf-core` 代码中实现；当前实现仍然只提供同步的 `scan(...)` 函数。下一轮由 `dev-core-scanner`、`dev-service-api` 与 `dev-cli-tui` 协同落地该抽象，以满足 PRD 9.1.1 与 9.2 中关于 `progress` / `scanned_files` / `scanned_bytes` 的验收要求。
+> 以上进度感知 API（`ScanConfig` / `ScanProgress` / `StatusSnapshot` / `ScanHandle` 及其方法）最初作为架构级设计提出，现已在 `surf-core` 代码中落地，并被 CLI 单次运行模式实际使用（参见 `workspaces/dev-core-scanner/surf-core/src/lib.rs` 与 `workspaces/dev-cli-tui/surf-cli/src/main.rs`）。当前实现仍存在若干局限：`total_bytes_estimate` 始终为 `None`，尚未对总字节数做估算；扫描逻辑尚未依据内部 `cancelled` 标志提前终止遍历，因此取消语义仍然是“占位/最佳努力”；CLI 侧虽然已经基于 `poll_status` 展示了 `scanned_files` 与 `scanned_bytes`，但尚未将 Ctrl+C 映射为显式的取消请求。后续迭代由 `dev-core-scanner`、`dev-service-api` 与 `dev-cli-tui` 协同继续完善这些行为，以完全满足 PRD 9.1.1 与 9.2 中关于 `progress` / `scanned_files` / `scanned_bytes` 的验收要求。
 
 ### 4.2 数据聚合层 (Data Aggregator)
 - **模块职责**：
@@ -657,12 +657,12 @@
 
 ### 5.1 单次运行模式数据流
 1. 用户执行 `surf --path /path/to/scan --min-size 100MB`。
-2. CLI 模块解析参数，根据当前实现或目标形态选择不同的数据流：
-   - **当前实现（无进度快照，仅 spinner）**：
+2. CLI 模块解析参数，根据历史实现与当前实现路径选择不同的数据流：
+   - **历史实现（无进度快照，仅 spinner）**：
      1. 直接调用核心扫描引擎的同步函数 `scan(&path, min_size_bytes, threads)`；
      2. 在等待结果期间，仅在 stderr 上展示 `indicatif::ProgressBar::new_spinner` 形式的“`Scanning <path> ...`”提示；
      3. 扫描完成或出错后关闭 spinner，进入结果展示或错误处理流程。
-   - **目标形态（复用核心层进度快照，满足 PRD 9.1.1）**：
+   - **当前实现路径（复用核心层进度快照，逐步对齐 PRD 9.1.1）**：
      1. CLI 构造 `ScanConfig { root, min_size, threads }` 并调用 `start_scan(config)` 获取 `ScanHandle`（见 4.1）；
      2. 在前台循环调用 `poll_status(&handle)`，根据返回的 `StatusSnapshot.progress.scanned_files` / `scanned_bytes` / `total_bytes_estimate` 更新 stderr 上的进度条文案，例如：
 
@@ -671,7 +671,7 @@
         ```
 
      3. 当 `StatusSnapshot.done == true` 时退出轮询，调用 `collect_results(handle)` 获取最终 `Vec<FileEntry>` 供后续展示使用；
-     4. 对于 Ctrl+C 中断场景，CLI 通过 `cancel(&handle)` 请求核心层终止扫描，并在 stderr 提示“用户中断”，以 130 等非零退出码结束进程，无论表格还是 JSON 模式均不输出部分结果。
+     4. 设计上，对于 Ctrl+C 中断场景，CLI 应通过 `cancel(&handle)` 请求核心层终止扫描，并在 stderr 提示“用户中断”，以 130 等非零退出码结束进程，无论表格还是 JSON 模式均不输出部分结果；当前代码尚未接入该信号处理与取消逻辑，本条视为后续迭代需要补齐的行为约定。
 3. 扫描完成后，数据聚合层汇总和排序结果（当前 MVP 中，大部分 TopN 与排序逻辑仍由 `surf-core::scan` 内部完成，数据聚合层后续迭代逐步承接更多责任）。
 4. CLI 模块以表格形式展示结果或根据 `--json` 输出结构化 JSON，保持如下 stdout/stderr 语义：
    - 进度条与日志统一输出到 stderr；
