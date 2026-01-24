@@ -851,6 +851,78 @@ mod tests {
     }
 
     #[test]
+    fn test_surf_cancel_success_for_existing_queued_task() {
+        // 先注册一个排队中的任务
+        let task_id = TASK_MANAGER.register_task(
+            "/tmp".to_string(),
+            0,
+            4,
+            Some(10),
+            Some("cancel-test".to_string()),
+            TaskState::Queued,
+        );
+
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.Cancel\",\"params\":{{\"task_id\":\"{}\"}},\"id\":6}}",
+            task_id
+        );
+
+        let response = handle_rpc_line(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        // 成功路径应返回 result，而不是 error
+        assert!(parsed.get("error").is_none());
+
+        let result = parsed["result"].as_object().expect("result should be an object");
+        assert_eq!(result["task_id"], task_id);
+        assert_eq!(result["previous_state"], "queued");
+        assert_eq!(result["current_state"], "canceled");
+        assert_eq!(parsed["id"], 6);
+
+        // 再次查询状态应反映为 canceled
+        let status_request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.Status\",\"params\":{{\"task_id\":\"{}\"}},\"id\":7}}",
+            task_id
+        );
+        let status_response = handle_rpc_line(&status_request).unwrap();
+        let status_parsed: serde_json::Value = serde_json::from_str(&status_response).unwrap();
+        let status_result = status_parsed["result"].as_object().expect("status result should be an object");
+        assert_eq!(status_result["state"], "canceled");
+    }
+
+    #[test]
+    fn test_surf_cancel_is_idempotent_for_terminated_task() {
+        // 创建一个任务并先标记为 Canceled
+        let task_id = TASK_MANAGER.register_task(
+            "/tmp/idempotent".to_string(),
+            0,
+            2,
+            None,
+            None,
+            TaskState::Canceled,
+        );
+
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.Cancel\",\"params\":{{\"task_id\":\"{}\"}},\"id\":8}}",
+            task_id
+        );
+
+        let response = handle_rpc_line(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert!(parsed.get("error").is_none());
+
+        let result = parsed["result"].as_object().expect("result should be an object");
+        assert_eq!(result["task_id"], task_id);
+        // 终止态任务再次取消时，previous_state 与 current_state 相同
+        assert_eq!(result["previous_state"], "canceled");
+        assert_eq!(result["current_state"], "canceled");
+        assert_eq!(parsed["id"], 8);
+    }
+
+    #[test]
     fn task_manager_registers_tasks_and_generates_incrementing_ids() {
         let manager = TaskManager::new();
 
@@ -1101,36 +1173,74 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                     // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
                     let detail = format!("params must be a JSON object for method {}", method);
                     JsonRpcError::invalid_params(Some(detail))
-               } else {
-                   // params 为对象，检查 task_id 字段
-                   let obj = req.params.as_object().unwrap();
-                   match obj.get("task_id") {
-                       None => {
-                           // 缺少 task_id -> INVALID_PARAMS
-                           let detail = "task_id must be a non-empty string".to_string();
-                           JsonRpcError::invalid_params(Some(detail))
-                       }
-                       Some(v) => {
-                           if v.is_string() {
-                               let task_id_str = v.as_str().unwrap();
-                               if task_id_str.is_empty() {
-                                   // 空字符串视为无效参数
-                                   let detail = "task_id must be a non-empty string".to_string();
-                                   JsonRpcError::invalid_params(Some(detail))
-                              } else {
-                                  // 当前尚未实现任务管理器：任何非空字符串一律视为不存在任务
-                                  let detail = format!("task_id not found: {}", task_id_str);
-                                  JsonRpcError::task_not_found(Some(detail))
-                              }
-                          } else {
-                               // task_id 既不是 string 也不是 null -> INVALID_PARAMS
-                               let detail = "task_id must be a string".to_string();
-                               JsonRpcError::invalid_params(Some(detail))
-                           }
-                       }
-                   }
-               }
-           }
+                } else {
+                    // params 为对象，检查 task_id 字段
+                    let obj = req.params.as_object().unwrap();
+                    match obj.get("task_id") {
+                        None => {
+                            // 缺少 task_id -> INVALID_PARAMS
+                            let detail = "task_id must be a non-empty string".to_string();
+                            JsonRpcError::invalid_params(Some(detail))
+                        }
+                        Some(v) => {
+                            if v.is_string() {
+                                let task_id_str = v.as_str().unwrap();
+                                if task_id_str.is_empty() {
+                                    // 空字符串视为无效参数
+                                    let detail = "task_id must be a non-empty string".to_string();
+                                    JsonRpcError::invalid_params(Some(detail))
+                                } else {
+                                    // 使用全局 TASK_MANAGER 执行幂等取消逻辑
+                                    match TASK_MANAGER.cancel_task(task_id_str) {
+                                        Some((previous_state, updated_info)) => {
+                                            let previous_state_str = match previous_state {
+                                                TaskState::Queued => "queued",
+                                                TaskState::Running => "running",
+                                                TaskState::Completed => "completed",
+                                                TaskState::Failed => "failed",
+                                                TaskState::Canceled => "canceled",
+                                            }
+                                            .to_string();
+
+                                            let current_state_str = match updated_info.state {
+                                                TaskState::Queued => "queued",
+                                                TaskState::Running => "running",
+                                                TaskState::Completed => "completed",
+                                                TaskState::Failed => "failed",
+                                                TaskState::Canceled => "canceled",
+                                            }
+                                            .to_string();
+
+                                            let result = SurfCancelResult {
+                                                task_id: task_id_str.to_string(),
+                                                previous_state: previous_state_str,
+                                                current_state: current_state_str,
+                                            };
+
+                                            let success_response =
+                                                JsonRpcSuccessResponse::from_result(result, req.id);
+                                            return Some(
+                                                serde_json::to_string(&success_response)
+                                                    .unwrap_or_else(|_| String::new()),
+                                            );
+                                        }
+                                        None => {
+                                            // 未找到任务 -> TASK_NOT_FOUND
+                                            let detail =
+                                                format!("task_id not found: {}", task_id_str);
+                                            JsonRpcError::task_not_found(Some(detail))
+                                        }
+                                    }
+                                }
+                            } else {
+                                // task_id 既不是 string 也不是 null -> INVALID_PARAMS
+                                let detail = "task_id must be a string".to_string();
+                                JsonRpcError::invalid_params(Some(detail))
+                            }
+                        }
+                    }
+                }
+            }
             // 其他支持的方法当前仍仅作为骨架存在：无论是否携带 params，一律返回 METHOD_NOT_FOUND
             _ => {
                 JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
