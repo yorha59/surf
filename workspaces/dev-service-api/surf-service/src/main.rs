@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
 use num_cpus;
+use std::path::PathBuf;
+use surf_core;
 
 /// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（当前为「增强骨架实现」）。
 ///
@@ -1212,27 +1214,40 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     };
                                     // 计算最终线程数
                                     let threads = scan_params.threads.unwrap_or_else(|| num_cpus::get());
-                                    // 注册任务
-                                    let task_id = TASK_MANAGER.register_task(
-                                        scan_params.path.clone(),
-                                        min_size_bytes,
+                                    // 构造 surf-core 扫描配置
+                                    let config = surf_core::ScanConfig {
+                                        root: PathBuf::from(&scan_params.path),
+                                        min_size: min_size_bytes,
                                         threads,
-                                        scan_params.limit,
-                                        scan_params.tag.clone(),
-                                        TaskState::Queued,
-                                    );
-                                    // 构造成功响应
-                                    let result = SurfScanResult {
-                                        task_id,
-                                        state: "queued".to_string(),
-                                        path: scan_params.path,
-                                        min_size_bytes,
-                                        threads,
-                                        limit: scan_params.limit,
                                     };
-                                    let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
-                                    // 提前返回成功响应
-                                    return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
+                                    // 启动真实扫描任务
+                                    match surf_core::start_scan(config) {
+                                        Ok(_handle) => {
+                                            // 扫描已启动，句柄被丢弃，后台线程继续运行
+                                            // 注册任务，状态为 Running
+                                            let task_id = TASK_MANAGER.register_task(
+                                                scan_params.path.clone(),
+                                                min_size_bytes,
+                                                threads,
+                                                scan_params.limit,
+                                                scan_params.tag.clone(),
+                                                TaskState::Running,
+                                            );
+                                            // 构造成功响应
+                                            let result = SurfScanResult {
+                                                task_id,
+                                                state: "running".to_string(),
+                                                path: scan_params.path,
+                                                min_size_bytes,
+                                                threads,
+                                                limit: scan_params.limit,
+                                            };
+                                            let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
+                                            // 提前返回成功响应
+                                            return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
+                                        }
+                                        Err(e) => JsonRpcError::invalid_params(Some(format!("failed to start scan: {}", e))),
+                                    }
                                 }
                                 Err(err) => {
                                     // 数值校验失败 -> INVALID_PARAMS
