@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use surf_core::scan;
+use surf_core::{ScanConfig, start_scan, poll_status, collect_results};
 use serde::Serialize;
 use std::time::Duration;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -162,7 +162,44 @@ fn main() {
     pb.set_message(format!("Scanning {} ...", args.path.display()));
     pb.set_style(ProgressStyle::default_spinner());
 
-    let entries = match scan(&args.path, min_size, args.threads) {
+    // 构造扫描配置
+    let config = ScanConfig {
+        root: args.path.clone(),
+        min_size,
+        threads: args.threads,
+    };
+    
+    // 启动异步扫描任务
+    let handle = match start_scan(config) {
+        Ok(v) => {
+            v
+        }
+        Err(e) => {
+            pb.finish_and_clear();
+            eprintln!("Failed to scan {}: {}", args.path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    
+    // 轮询扫描进度，更新进度条消息
+    loop {
+        let status = poll_status(&handle);
+        pb.set_message(format!(
+            "Scanning {} ... files={}, bytes={}",
+            args.path.display(),
+            status.progress.scanned_files,
+            status.progress.scanned_bytes
+        ));
+        
+        if status.done {
+            break;
+        }
+        
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    
+    // 获取最终结果
+    let entries = match collect_results(handle) {
         Ok(v) => {
             pb.finish_and_clear();
             v
