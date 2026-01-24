@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
+const TASK_NOT_FOUND: i32 = -32001;
 
 /// 支持的 JSON-RPC 方法名称（来自 Architecture.md 4.3.*）
 const SUPPORTED_METHODS: [&str; 4] = [
@@ -109,6 +110,15 @@ impl JsonRpcError {
         JsonRpcError {
             code: INVALID_PARAMS,
             message: "INVALID_PARAMS".to_string(),
+            data: detail.map(|d| json!({ "detail": d })),
+        }
+    }
+
+    /// 构造一个标准 TASK_NOT_FOUND 错误
+    fn task_not_found(detail: Option<String>) -> Self {
+        JsonRpcError {
+            code: TASK_NOT_FOUND,
+            message: "TASK_NOT_FOUND".to_string(),
             data: detail.map(|d| json!({ "detail": d })),
         }
     }
@@ -402,6 +412,92 @@ mod tests {
         assert!(detail.contains("threads"));
         assert!(detail.contains(">= 1"));
     }
+
+    #[test]
+    fn test_surf_status_params_not_object_invalid_params() {
+        // 构造请求：params 是数组而不是对象
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":[],"id":1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("params must be a JSON object for method Surf.Status"));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_status_missing_or_bad_task_id_invalid_params() {
+        // 测试缺失 task_id 字段
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{},"id":2}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a string or null"));
+        assert_eq!(parsed["id"], 2);
+
+        // 测试 task_id 是数字而不是 string/null
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":42},"id":3}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a string or null"));
+        assert_eq!(parsed["id"], 3);
+
+        // 测试 task_id 是空字符串（视为无效参数）
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":""},"id":4}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a non-empty string or null"));
+        assert_eq!(parsed["id"], 4);
+    }
+
+    #[test]
+    fn test_surf_status_task_not_found_for_unknown_id() {
+        // 请求一个不存在的 task_id
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":"non-existent"},"id":3}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "TASK_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id not found: non-existent"));
+        assert_eq!(parsed["id"], 3);
+    }
+
+    #[test]
+    fn test_surf_status_null_task_id_not_implemented_yet() {
+        // task_id 显式为 null
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":null},"id":4}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert_eq!(detail, "method not implemented yet");
+        assert_eq!(parsed["id"], 4);
+    }
+
+    #[test]
+    fn test_surf_status_params_null_not_implemented_yet() {
+        // params 整体为 null（或缺失）
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","id":5}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert_eq!(detail, "method not implemented yet");
+        assert_eq!(parsed["id"], 5);
+    }
 }
 
 impl JsonRpcErrorResponse {
@@ -492,6 +588,52 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                         Err(e) => {
                             let detail = format!("invalid Surf.Scan params: {}", e);
                             JsonRpcError::invalid_params(Some(detail))
+                        }
+                    }
+                }
+            }
+            // Surf.Status 对参数形状有基本校验，但暂不实现真正的任务查询逻辑：
+            // - params 为 null 时，视为“方法尚未实现”的骨架占位；
+            // - params 不是对象 -> INVALID_PARAMS；
+            // - params 为对象时，检查 task_id 字段的类型，并返回相应的错误（INVALID_PARAMS / METHOD_NOT_FOUND / TASK_NOT_FOUND）。
+            "Surf.Status" => {
+                if req.params.is_null() {
+                    // 缺少参数但方法本身受支持：当前仅作为“尚未实现”的占位
+                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                } else if !req.params.is_object() {
+                    // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
+                    let detail = format!("params must be a JSON object for method {}", method);
+                    JsonRpcError::invalid_params(Some(detail))
+                } else {
+                    // params 为对象，检查 task_id 字段
+                    let obj = req.params.as_object().unwrap();
+                    let task_id_value = obj.get("task_id");
+                    match task_id_value {
+                        None => {
+                            // task_id 字段缺失 -> INVALID_PARAMS
+                            let detail = "task_id must be a string or null".to_string();
+                            JsonRpcError::invalid_params(Some(detail))
+                        }
+                        Some(v) => {
+                            if v.is_string() {
+                                let task_id_str = v.as_str().unwrap();
+                                if task_id_str.is_empty() {
+                                    // 空字符串视为无效参数
+                                    let detail = "task_id must be a non-empty string or null".to_string();
+                                    JsonRpcError::invalid_params(Some(detail))
+                                } else {
+                                    // 非空字符串：目前没有任务管理器，一律返回 TASK_NOT_FOUND
+                                    let detail = format!("task_id not found: {}", task_id_str);
+                                    JsonRpcError::task_not_found(Some(detail))
+                                }
+                            } else if v.is_null() {
+                                // task_id 为 null：暂不实现“列出所有活躍任务”的逻辑
+                                JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                            } else {
+                                // task_id 既不是 string 也不是 null -> INVALID_PARAMS
+                                let detail = "task_id must be a string or null".to_string();
+                                JsonRpcError::invalid_params(Some(detail))
+                            }
                         }
                     }
                 }
