@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::collections::HashMap;
-use std::sync::{Mutex};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use once_cell::sync::Lazy;
@@ -70,6 +70,8 @@ struct TaskInfo {
     updated_at: u64,
     /// 当前任务状态（queued/running/completed/failed/canceled）。
     state: TaskState,
+    /// 底层扫描任务的句柄（如果有）。
+    scan_handle: Option<Arc<surf_core::ScanHandle>>,
 }
 
 /// 内存中的简单任务管理器骨架。
@@ -101,6 +103,36 @@ impl TaskManager {
         id.to_string()
     }
 
+    /// 注册一个新的任务元数据，包含扫描句柄，并返回分配的 task_id。
+    fn register_task_with_handle(
+        &self,
+        path: String,
+        min_size_bytes: u64,
+        threads: usize,
+        limit: Option<usize>,
+        tag: Option<String>,
+        state: TaskState,
+        scan_handle: Option<Arc<surf_core::ScanHandle>>,
+    ) -> String {
+        let task_id = self.next_task_id();
+        let now = current_unix_timestamp();
+        let info = TaskInfo {
+            path,
+            min_size_bytes,
+            threads,
+            limit,
+            tag,
+            started_at: now,
+            updated_at: now,
+            state,
+            scan_handle,
+        };
+
+        let mut inner = self.inner.lock().expect("TaskManager mutex poisoned");
+        inner.insert(task_id.clone(), info);
+        task_id
+    }
+
     /// 注册一个新的任务元数据，并返回分配的 task_id。
     ///
     /// 该方法目前只记录基础字段和初始状态，不涉及 `surf-core` 的扫描句柄；
@@ -115,22 +147,7 @@ impl TaskManager {
         tag: Option<String>,
         state: TaskState,
     ) -> String {
-        let task_id = self.next_task_id();
-        let now = current_unix_timestamp();
-        let info = TaskInfo {
-            path,
-            min_size_bytes,
-            threads,
-            limit,
-            tag,
-            started_at: now,
-            updated_at: now,
-            state,
-        };
-
-        let mut inner = self.inner.lock().expect("TaskManager mutex poisoned");
-        inner.insert(task_id.clone(), info);
-        task_id
+        self.register_task_with_handle(path, min_size_bytes, threads, limit, tag, state, None)
     }
 
     /// 读取某个任务的元数据快照。
@@ -172,6 +189,12 @@ impl TaskManager {
             TaskState::Queued | TaskState::Running => TaskState::Canceled,
             TaskState::Completed | TaskState::Failed | TaskState::Canceled => previous_state,
         };
+        // 如果状态从 Queued/Running 迁移到 Canceled，尝试取消底层扫描
+        if new_state == TaskState::Canceled && previous_state != TaskState::Canceled {
+            if let Some(handle) = &info.scan_handle {
+                surf_core::cancel(handle);
+            }
+        }
         info.state = new_state;
         info.updated_at = current_unix_timestamp();
         // 返回克隆，避免持有锁
@@ -297,6 +320,23 @@ impl SurfStatusResult {
     ///
     /// 当前尚未集成 surf-core 的进度快照，因此进度字段统一使用占位值。
     fn from_task_info(task_id: &str, info: TaskInfo) -> Self {
+        // 如果有扫描句柄，查询真实进度
+        let (progress, scanned_files, scanned_bytes, total_bytes_estimate) = match info.scan_handle {
+            Some(handle) => {
+                let snapshot = surf_core::poll_status(&handle);
+                let scanned_files = snapshot.progress.scanned_files;
+                let scanned_bytes = snapshot.progress.scanned_bytes;
+                let total_bytes_estimate = snapshot.progress.total_bytes_estimate;
+                // 计算进度百分比（0.0-1.0），如果总字节数未知则返回0.0
+                let progress = match total_bytes_estimate {
+                    Some(total) if total > 0 => scanned_bytes as f64 / total as f64,
+                    _ => 0.0,
+                };
+                (progress, scanned_files, scanned_bytes, total_bytes_estimate)
+            }
+            None => (0.0, 0, 0, None),
+        };
+
         SurfStatusResult {
             task_id: task_id.to_string(),
             state: match info.state {
@@ -306,11 +346,10 @@ impl SurfStatusResult {
                 TaskState::Failed => "failed".to_string(),
                 TaskState::Canceled => "canceled".to_string(),
             },
-            // 当前尚未集成 surf-core 进度快照，统一返回占位值
-            progress: 0.0,
-            scanned_files: 0,
-            scanned_bytes: 0,
-            total_bytes_estimate: None,
+            progress,
+            scanned_files,
+            scanned_bytes,
+            total_bytes_estimate,
             started_at: info.started_at,
             updated_at: info.updated_at,
             tag: info.tag,
@@ -615,7 +654,7 @@ mod tests {
         assert!(!task_id.is_empty());
 
         // state / path 与请求参数一致
-        assert_eq!(result["state"], "queued");
+        assert_eq!(result["state"], "running");
         assert_eq!(result["path"], "/tmp");
 
         // min_size_bytes 按 10MB 解析
@@ -1215,39 +1254,41 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     // 计算最终线程数
                                     let threads = scan_params.threads.unwrap_or_else(|| num_cpus::get());
                                     // 构造 surf-core 扫描配置
-                                    let config = surf_core::ScanConfig {
-                                        root: PathBuf::from(&scan_params.path),
-                                        min_size: min_size_bytes,
-                                        threads,
-                                    };
-                                    // 启动真实扫描任务
-                                    match surf_core::start_scan(config) {
-                                        Ok(_handle) => {
-                                            // 扫描已启动，句柄被丢弃，后台线程继续运行
-                                            // 注册任务，状态为 Running
-                                            let task_id = TASK_MANAGER.register_task(
-                                                scan_params.path.clone(),
-                                                min_size_bytes,
-                                                threads,
-                                                scan_params.limit,
-                                                scan_params.tag.clone(),
-                                                TaskState::Running,
-                                            );
-                                            // 构造成功响应
-                                            let result = SurfScanResult {
-                                                task_id,
-                                                state: "running".to_string(),
-                                                path: scan_params.path,
-                                                min_size_bytes,
-                                                threads,
-                                                limit: scan_params.limit,
-                                            };
-                                            let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
-                                            // 提前返回成功响应
-                                            return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
-                                        }
-                                        Err(e) => JsonRpcError::invalid_params(Some(format!("failed to start scan: {}", e))),
-                                    }
+                    let config = surf_core::ScanConfig {
+                        root: PathBuf::from(&scan_params.path),
+                        min_size: min_size_bytes,
+                        threads,
+                    };
+                    // 启动真实扫描任务
+                    match surf_core::start_scan(config) {
+                        Ok(handle) => {
+                            // 扫描已启动，保存句柄并用 Arc 包装
+                            let handle_arc = Arc::new(handle);
+                            // 注册任务，状态为 Running，传入扫描句柄
+                            let task_id = TASK_MANAGER.register_task_with_handle(
+                                scan_params.path.clone(),
+                                min_size_bytes,
+                                threads,
+                                scan_params.limit,
+                                scan_params.tag.clone(),
+                                TaskState::Running,
+                                Some(handle_arc.clone()),
+                            );
+                            // 构造成功响应
+                            let result = SurfScanResult {
+                                task_id,
+                                state: "running".to_string(),
+                                path: scan_params.path,
+                                min_size_bytes,
+                                threads,
+                                limit: scan_params.limit,
+                            };
+                            let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
+                            // 提前返回成功响应
+                            return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
+                        }
+                        Err(e) => JsonRpcError::invalid_params(Some(format!("failed to start scan: {}", e))),
+                    }
                                 }
                                 Err(err) => {
                                     // 数值校验失败 -> INVALID_PARAMS
