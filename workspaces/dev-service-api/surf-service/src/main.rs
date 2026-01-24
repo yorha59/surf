@@ -16,6 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// JSON-RPC 2.0 标准错误码（部分）
 const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
+const INVALID_PARAMS: i32 = -32602;
 
 /// 支持的 JSON-RPC 方法名称（来自 Architecture.md 4.3.*）
 const SUPPORTED_METHODS: [&str; 4] = [
@@ -81,6 +82,15 @@ impl JsonRpcError {
             data: detail.map(|d| json!({ "detail": d })),
         }
     }
+
+    /// 构造一个标准 INVALID_PARAMS 错误
+    fn invalid_params(detail: Option<String>) -> Self {
+        JsonRpcError {
+            code: INVALID_PARAMS,
+            message: "INVALID_PARAMS".to_string(),
+            data: detail.map(|d| json!({ "detail": d })),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +151,22 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_params_for_supported_method() {
+        // 构造一个支持的方法（Surf.Scan），但 params 是数组（应为对象） -> INVALID_PARAMS
+        let request = r#"{"jsonrpc": "2.0", "method": "Surf.Scan", "params": [], "id": 1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        // 检查 data.detail 是否包含对 params 类型的说明
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("params must be a JSON object for method Surf.Scan"));
+        // 检查 id 是否保留原值
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
     fn test_empty_line_skipped() {
         // 空行应该返回 None
         let response = handle_rpc_line("");
@@ -197,13 +223,24 @@ fn handle_rpc_line(line: &str) -> Option<String> {
         return Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()));
     }
 
-    // 检查 method 是否为支持的四个方法之一（本轮暂不实现，统一返回 METHOD_NOT_FOUND）
+    // 检查 method 是否为支持的四个方法之一
     let is_supported = SUPPORTED_METHODS.iter().any(|&m| m == req.method);
+    
     let error = if is_supported {
-        JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+        // 对于支持的方法，检查参数形状是否符合预期（本项目仅使用 named params，即 JSON 对象）
+        if !req.params.is_object() {
+            // params 不是对象（null、数组、字符串、数字等） -> INVALID_PARAMS
+            let detail = format!("params must be a JSON object for method {}", req.method);
+            JsonRpcError::invalid_params(Some(detail))
+        } else {
+            // 参数形状正确，但方法尚未实现 -> METHOD_NOT_FOUND
+            JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+        }
     } else {
+        // 不支持的方法 -> METHOD_NOT_FOUND
         JsonRpcError::method_not_found(Some(format!("method \"{}\" not found", req.method)))
     };
+    
     let response = JsonRpcErrorResponse::from_error(error, req.id);
     Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()))
 }
