@@ -804,6 +804,7 @@
       - 可执行文件：`target/release/surf-service`
     - 如在仓库根目录统一构建，可使用：
       - `cargo build -p surf-service --release`（产物路径为根目录下 `target/release/surf-service`）。
+    - 构建注意事项：在部分离线或使用镜像源的环境中，`cargo build -p surf-service --release` 可能因 `clap` / `clap_builder` 依赖解析冲突而失败（例如报错 `failed to select a version for clap_builder ... does not have these features`）；这类问题属于构建环境与上游依赖的版本/特性对齐问题，需要在具备网络或完整依赖缓存的本地/CI 环境中由人类开发者调整依赖版本或 Cargo 配置后重新构建。本仓库不在架构层面对具体镜像或依赖修复策略做出强约束，仅约定成功构建后应按上述路径产出 `surf-service` 二进制供交付阶段使用。
 
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
