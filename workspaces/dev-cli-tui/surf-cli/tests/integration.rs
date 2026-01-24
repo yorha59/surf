@@ -265,3 +265,94 @@ fn test_surf_table_output_with_min_size_and_limit() {
         data_lines
     );
 }
+
+/// 测试表格模式下，传入不存在或不可访问的路径时的行为。
+#[test]
+fn test_surf_table_error_on_nonexistent_path() {
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    // 使用一个几乎不可能存在的路径
+    cmd.args(["--path", "/tmp/this_path_should_not_exist_123456789"]);
+    // 不传递 --json，走表格输出路径
+
+    let output = cmd.output().expect("failed to execute surf");
+    // 进程应以非零退出码结束
+    assert!(!output.status.success(), "surf should exit with non-zero status");
+    // stdout 不应包含表格内容（表头 "SIZE(BYTES)" 或 "PATH"）
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "stdout should be empty on error, got: {}",
+        stdout
+    );
+    // stderr 应包含错误信息（检查是否包含 "Failed to scan" 或 "does not exist" 之类的关键词）
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to scan") || stderr.contains("does not exist") || stderr.contains("No such file"),
+        "stderr should contain error message about scanning, got: {}",
+        stderr
+    );
+}
+
+/// 测试表格模式下，未显式传入 `--limit` 时默认只展示前 20 条记录。
+#[test]
+fn test_surf_table_default_limit_20() {
+    let temp_dir = tempdir().expect("failed to create temp directory");
+    let temp_path = temp_dir.path();
+
+    // 创建超过 20 个符合 min-size 要求的测试文件（这里创建 21 个）
+    // 使用默认 min-size = 0，所以任何文件都会被包含。
+    for i in 0..21 {
+        let file_path = temp_path.join(format!("file_{}.txt", i));
+        File::create(&file_path)
+            .expect("failed to create test file")
+            .write_all(&[b'z'; 10]) // 每个文件 10 字节，确保大于默认 min-size (0)
+            .expect("failed to write test file");
+    }
+
+    // 不传递 --limit，也不传递 --json，走表格输出路径
+    let mut cmd = Command::cargo_bin("surf").expect("failed to find surf binary");
+    cmd.args(["--path", temp_path.to_str().unwrap()]);
+    // 可以显式指定 --min-size 0，但默认就是 0，所以可以不传
+
+    let output = cmd.output().expect("failed to execute surf");
+    assert!(
+        output.status.success(),
+        "surf exited with non-zero status: {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    // 表格应包含表头行、分隔行，以及数据行
+    assert!(lines.len() >= 3, "table output should have at least header, separator, and one data line");
+    
+    // 查找表头行和分隔行的位置
+    let mut data_line_count = 0;
+    let mut found_header = false;
+    let mut found_separator = false;
+    for line in &lines {
+        if line.contains("SIZE") && line.contains("PATH") {
+            found_header = true;
+        } else if found_header && !found_separator && line.chars().any(|c| c == '-') {
+            found_separator = true;
+        } else if found_header && found_separator {
+            data_line_count += 1;
+        }
+    }
+    
+    // 确保表头和分隔符存在
+    assert!(found_header, "table header not found in output");
+    assert!(found_separator, "table separator not found in output");
+    // 数据行数应不超过默认 limit 20
+    assert!(
+        data_line_count <= 20,
+        "data lines count {} exceeds default limit 20",
+        data_line_count
+    );
+    // 至少应有一行数据（因为我们创建了文件）
+    assert!(
+        data_line_count >= 1,
+        "expected at least one data line, got {}",
+        data_line_count
+    );
+}
