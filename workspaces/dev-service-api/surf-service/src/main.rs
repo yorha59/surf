@@ -172,6 +172,29 @@ impl TaskManager {
         // 返回克隆，避免持有锁
         Some((previous_state, info.clone()))
     }
+
+    /// 列出所有处于非终止态的任务（queued/running）。
+    ///
+    /// 该方法用于 Surf.Status 在 task_id 为空或缺省时返回任务列表，
+    /// 对 Completed / Failed / Canceled 等终止态任务不再返回状态。
+    fn list_non_terminated_tasks(&self) -> Vec<(String, TaskInfo)> {
+        let inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // 若互斥锁已中毒，则返回空列表，避免因单个任务异常影响整个接口。
+                return Vec::new();
+            }
+        };
+
+        inner
+            .iter()
+            .filter(|(_, info)| match info.state {
+                TaskState::Queued | TaskState::Running => true,
+                TaskState::Completed | TaskState::Failed | TaskState::Canceled => false,
+            })
+            .map(|(id, info)| (id.clone(), info.clone()))
+            .collect()
+    }
 }
 
 /// 全局任务管理器实例
@@ -262,6 +285,32 @@ struct SurfStatusResult {
     updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tag: Option<String>,
+}
+
+impl SurfStatusResult {
+    /// 从 TaskInfo 构造状态结果快照。
+    ///
+    /// 当前尚未集成 surf-core 的进度快照，因此进度字段统一使用占位值。
+    fn from_task_info(task_id: &str, info: TaskInfo) -> Self {
+        SurfStatusResult {
+            task_id: task_id.to_string(),
+            state: match info.state {
+                TaskState::Queued => "queued".to_string(),
+                TaskState::Running => "running".to_string(),
+                TaskState::Completed => "completed".to_string(),
+                TaskState::Failed => "failed".to_string(),
+                TaskState::Canceled => "canceled".to_string(),
+            },
+            // 当前尚未集成 surf-core 进度快照，统一返回占位值
+            progress: 0.0,
+            scanned_files: 0,
+            scanned_bytes: 0,
+            total_bytes_estimate: None,
+            started_at: info.started_at,
+            updated_at: info.updated_at,
+            tag: info.tag,
+        }
+    }
 }
 
 /// Surf.Cancel 方法的成功响应结果结构体
@@ -678,15 +727,6 @@ mod tests {
 
     #[test]
     fn test_surf_status_missing_or_bad_task_id_invalid_params() {
-        // 测试缺失 task_id 字段
-        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{},"id":2}"#;
-        let response = handle_rpc_line(request).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
-        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
-        assert!(detail.contains("task_id must be a string or null"));
-        assert_eq!(parsed["id"], 2);
-
         // 测试 task_id 是数字而不是 string/null
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":42},"id":3}"#;
         let response = handle_rpc_line(request).unwrap();
@@ -765,31 +805,146 @@ mod tests {
     }
 
     #[test]
-    fn test_surf_status_null_task_id_not_implemented_yet() {
-        // task_id 显式为 null
-        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":null},"id":4}"#;
+    fn test_surf_status_missing_task_id_lists_non_terminated_tasks() {
+        // 创建三种不同状态的任务，其中 Completed 为终止态，应被过滤掉
+        let _completed_id = TASK_MANAGER.register_task(
+            "/tmp/status-missing-completed".to_string(),
+            0,
+            1,
+            None,
+            Some("status-missing-completed".to_string()),
+            TaskState::Completed,
+        );
+
+        let queued_id = TASK_MANAGER.register_task(
+            "/tmp/status-missing-queued".to_string(),
+            0,
+            1,
+            None,
+            Some("status-missing-queued".to_string()),
+            TaskState::Queued,
+        );
+
+        let running_id = TASK_MANAGER.register_task(
+            "/tmp/status-missing-running".to_string(),
+            0,
+            1,
+            None,
+            Some("status-missing-running".to_string()),
+            TaskState::Running,
+        );
+
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{},"id":10}"#;
         let response = handle_rpc_line(request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
         assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
-        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
-        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
-        assert_eq!(detail, "method not implemented yet");
-        assert_eq!(parsed["id"], 4);
+        assert!(parsed.get("error").is_none(), "expected success result when task_id is missing");
+        assert_eq!(parsed["id"], 10);
+
+        let result = parsed["result"].as_array().expect("result should be an array");
+        assert!(result.len() >= 2);
+
+        let mut seen_queued = false;
+        let mut seen_running = false;
+
+        for entry in result {
+            let state = entry["state"].as_str().unwrap_or("");
+            // 列表中不应出现终止态 canceled；Completed 任务已在服务层过滤
+            assert_ne!(state, "canceled");
+
+            if let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) {
+                if tag == "status-missing-queued" {
+                    seen_queued = true;
+                    assert_eq!(state, "queued");
+                    assert_eq!(entry["task_id"].as_str().unwrap(), queued_id);
+                }
+                if tag == "status-missing-running" {
+                    seen_running = true;
+                    assert_eq!(state, "running");
+                    assert_eq!(entry["task_id"].as_str().unwrap(), running_id);
+                }
+                // Completed 任务的 tag 不应出现在结果中
+                assert_ne!(tag, "status-missing-completed");
+            }
+        }
+
+        assert!(seen_queued, "queued task should be present in status list");
+        assert!(seen_running, "running task should be present in status list");
     }
 
     #[test]
-    fn test_surf_status_params_null_not_implemented_yet() {
-        // params 整体为 null（或缺失）
-        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","id":5}"#;
+    fn test_surf_status_null_task_id_lists_non_terminated_tasks() {
+        // task_id 显式为 null 时，应与缺省 task_id 行为一致，返回所有非终止态任务
+        let queued_id = TASK_MANAGER.register_task(
+            "/tmp/status-null-queued".to_string(),
+            0,
+            1,
+            None,
+            Some("status-null-queued".to_string()),
+            TaskState::Queued,
+        );
+
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":null},"id":11}"#;
         let response = handle_rpc_line(request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
         assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
-        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
-        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
-        assert_eq!(detail, "method not implemented yet");
-        assert_eq!(parsed["id"], 5);
+        assert!(parsed.get("error").is_none());
+        assert_eq!(parsed["id"], 11);
+
+        let result = parsed["result"].as_array().expect("result should be an array");
+        assert!(!result.is_empty());
+
+        let mut seen_queued = false;
+        for entry in result {
+            if let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) {
+                if tag == "status-null-queued" {
+                    seen_queued = true;
+                    assert_eq!(entry["state"], "queued");
+                    assert_eq!(entry["task_id"].as_str().unwrap(), queued_id);
+                }
+            }
+        }
+
+        assert!(seen_queued, "queued task should be present when task_id is null");
+    }
+
+    #[test]
+    fn test_surf_status_params_null_lists_non_terminated_tasks() {
+        // params 整体为 null（或缺失）时，也应返回所有非终止态任务
+        let running_id = TASK_MANAGER.register_task(
+            "/tmp/status-params-null-running".to_string(),
+            0,
+            1,
+            None,
+            Some("status-params-null-running".to_string()),
+            TaskState::Running,
+        );
+
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","id":12}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert!(parsed.get("error").is_none());
+        assert_eq!(parsed["id"], 12);
+
+        let result = parsed["result"].as_array().expect("result should be an array");
+        assert!(!result.is_empty());
+
+        let mut seen_running = false;
+        for entry in result {
+            if let Some(tag) = entry.get("tag").and_then(|v| v.as_str()) {
+                if tag == "status-params-null-running" {
+                    seen_running = true;
+                    assert_eq!(entry["state"], "running");
+                    assert_eq!(entry["task_id"].as_str().unwrap(), running_id);
+                }
+            }
+        }
+
+        assert!(seen_running, "running task should be present when params is null");
     }
 
     #[test]
@@ -1091,16 +1246,32 @@ fn handle_rpc_line(line: &str) -> Option<String> {
             }
             // Surf.Status 对参数形状有基本校验，并在 task_id 为非空字符串时
             // 尝试从内存任务管理器中读取对应任务的元数据：
-            // - params 为 null 时，视为“方法尚未实现”的骨架占位（预留查询所有活跃任务的能力）；
+            // - params 为 null 时，返回所有处于非终止态（queued/running）的任务列表；
             // - params 不是对象 -> INVALID_PARAMS；
             // - params 为对象且 task_id 为非空字符串时：
             //   - 若能在 TASK_MANAGER 中找到对应任务，返回成功响应；
             //   - 否则返回 TASK_NOT_FOUND；
-            // - task_id 缺失、类型错误或为空字符串 -> INVALID_PARAMS。
+            // - task_id 类型错误或为空字符串 -> INVALID_PARAMS；
+            // - task_id 字段缺失或显式为 null -> 返回所有处于非终止态的任务列表。
             "Surf.Status" => {
+                // 公共逻辑：构造“列出所有非终止态任务”的成功响应
+                let list_all_non_terminated = || {
+                    let tasks = TASK_MANAGER.list_non_terminated_tasks();
+                    let results: Vec<SurfStatusResult> = tasks
+                        .into_iter()
+                        .map(|(id, info)| SurfStatusResult::from_task_info(&id, info))
+                        .collect();
+                    let success_response =
+                        JsonRpcSuccessResponse::from_result(results, req.id.clone());
+                    Some(
+                        serde_json::to_string(&success_response)
+                            .unwrap_or_else(|_| String::new()),
+                    )
+                };
+
                 if req.params.is_null() {
-                    // 缺少参数但方法本身受支持：当前仅作为“尚未实现”的占位
-                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                    // 缺少参数：按 Architecture.md 4.3.4 约定，视为查询所有活跃任务
+                    return list_all_non_terminated();
                 } else if !req.params.is_object() {
                     // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
                     let detail = format!("params must be a JSON object for method {}", method);
@@ -1111,9 +1282,8 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                     let task_id_value = obj.get("task_id");
                     match task_id_value {
                         None => {
-                            // task_id 字段缺失 -> INVALID_PARAMS
-                            let detail = "task_id must be a string or null".to_string();
-                            JsonRpcError::invalid_params(Some(detail))
+                            // task_id 缺失：按约定列出所有活跃任务
+                            return list_all_non_terminated();
                         }
                         Some(v) => {
                             if v.is_string() {
@@ -1126,26 +1296,14 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     // 非空字符串：尝试从任务管理器查询任务元数据
                                     match TASK_MANAGER.get_task_info(task_id_str) {
                                         Some(info) => {
-                                            let result = SurfStatusResult {
-                                                task_id: task_id_str.to_string(),
-                                                state: match info.state {
-                                                    TaskState::Queued => "queued".to_string(),
-                                                    TaskState::Running => "running".to_string(),
-                                                    TaskState::Completed => "completed".to_string(),
-                                                    TaskState::Failed => "failed".to_string(),
-                                                    TaskState::Canceled => "canceled".to_string(),
-                                                },
-                                                // 当前尚未集成 surf-core 进度快照，统一返回 0
-                                                progress: 0.0,
-                                                scanned_files: 0,
-                                                scanned_bytes: 0,
-                                                total_bytes_estimate: None,
-                                                started_at: info.started_at,
-                                                updated_at: info.updated_at,
-                                                tag: info.tag,
-                                            };
-                                            let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
-                                            return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
+                                            let result =
+                                                SurfStatusResult::from_task_info(task_id_str, info);
+                                            let success_response =
+                                                JsonRpcSuccessResponse::from_result(result, req.id);
+                                            return Some(
+                                                serde_json::to_string(&success_response)
+                                                    .unwrap_or_else(|_| String::new()),
+                                            );
                                         }
                                         None => {
                                             let detail = format!("task_id not found: {}", task_id_str);
@@ -1154,8 +1312,8 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     }
                                 }
                             } else if v.is_null() {
-                                // task_id 为 null：暂不实现“列出所有活躍任务”的逻辑
-                                JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                                // task_id 显式为 null：列出所有活跃任务
+                                return list_all_non_terminated();
                             } else {
                                 // task_id 既不是 string 也不是 null -> INVALID_PARAMS
                                 let detail = "task_id must be a string or null".to_string();
