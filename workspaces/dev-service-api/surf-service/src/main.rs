@@ -114,6 +114,64 @@ impl JsonRpcError {
     }
 }
 
+/// 解析大小字符串（与 CLI 中的 parse_size 语义保持一致）
+///
+/// 支持的单位：B/KB/MB/GB（不区分大小写），空字符串或纯空白视为 0。
+/// 返回解析后的字节数，若解析失败则返回包含错误信息的字符串。
+fn parse_size_for_service(input: &str) -> Result<u64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Ok(0);
+    }
+
+    let split_at = s
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or_else(|| s.len());
+
+    let (num_part, unit_part) = s.split_at(split_at);
+    let value: u64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid size number: {}", num_part))?;
+
+    let unit = unit_part.trim().to_ascii_uppercase();
+    let multiplier: u64 = match unit.as_str() {
+        "" | "B" => 1,
+        "K" | "KB" => 1024,
+        "M" | "MB" => 1024 * 1024,
+        "G" | "GB" => 1024 * 1024 * 1024,
+        other => return Err(format!("unsupported size unit: {}", other)),
+    };
+
+    Ok(value.saturating_mul(multiplier))
+}
+
+/// 校验 Surf.Scan 参数的数值合法性（本轮仅校验 min_size 和 threads）
+///
+/// 若校验通过返回 `Ok(())`，否则返回 `INVALID_PARAMS` 错误。
+/// 注意：此校验不涉及业务逻辑（如路径是否存在、任务管理器是否就绪等）。
+fn validate_surf_scan_params(params: &SurfScanParams) -> Result<(), JsonRpcError> {
+    // 校验 min_size（如果存在）
+    if let Some(ref min_size_str) = params.min_size {
+        match parse_size_for_service(min_size_str) {
+            Ok(_) => {} // 解析成功，值合法
+            Err(e) => {
+                let detail = format!("invalid min_size: {}", e);
+                return Err(JsonRpcError::invalid_params(Some(detail)));
+            }
+        }
+    }
+    
+    // 校验 threads（如果存在）
+    if let Some(threads) = params.threads {
+        if threads == 0 {
+            let detail = "invalid threads: must be >= 1".to_string();
+            return Err(JsonRpcError::invalid_params(Some(detail)));
+        }
+    }
+    
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +257,36 @@ mod tests {
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
         assert!(detail.contains("invalid Surf.Scan params"));
         assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_scan_invalid_min_size_unit() {
+        // min_size 单位非法 -> INVALID_PARAMS
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Scan","params":{"path":"/tmp","min_size":"10XB"},"id":1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("min_size"));
+        assert!(detail.contains("unsupported"));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_scan_invalid_threads_zero() {
+        // threads 为 0 -> INVALID_PARAMS
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Scan","params":{"path":"/tmp","threads":0},"id":2}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("threads"));
+        assert!(detail.contains(">= 1"));
+        assert_eq!(parsed["id"], 2);
     }
 
     #[test]
@@ -311,9 +399,18 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                 } else {
                     // params 为对象，尝试解析为 SurfScanParams；解析失败视为 INVALID_PARAMS
                     match serde_json::from_value::<SurfScanParams>(req.params.clone()) {
-                        Ok(_scan_params) => {
-                            // 参数结构正确，但业务逻辑尚未落地 -> METHOD_NOT_FOUND 占位
-                            JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                        Ok(scan_params) => {
+                            // 参数结构正确，进一步校验数值合法性
+                            match validate_surf_scan_params(&scan_params) {
+                                Ok(()) => {
+                                    // 数值也合法，但业务逻辑尚未落地 -> METHOD_NOT_FOUND 占位
+                                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                                }
+                                Err(err) => {
+                                    // 数值校验失败 -> INVALID_PARAMS
+                                    err
+                                }
+                            }
                         }
                         Err(e) => {
                             let detail = format!("invalid Surf.Scan params: {}", e);
