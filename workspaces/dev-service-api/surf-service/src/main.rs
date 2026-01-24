@@ -67,11 +67,11 @@ struct TaskInfo {
     state: TaskState,
 }
 
-    /// 内存中的简单任务管理器骨架。
-    ///
-    /// - 当前负责分配任务 ID 并记录 `TaskInfo` 元数据；
-    /// - 后续迭代会在此基础上补充对 `surf-core::ScanHandle` 的持有与进度快照，
-    ///   以便真正实现 Architecture.md 4.3.7 所描述的任务生命周期与 `Surf.Status` 映射。
+/// 内存中的简单任务管理器骨架。
+///
+/// - 当前负责分配任务 ID 并记录 `TaskInfo` 元数据；
+/// - 后续迭代会在此基础上补充对 `surf-core::ScanHandle` 的持有与进度快照，
+///   以便真正实现 Architecture.md 4.3.7 所描述的任务生命周期与 `Surf.Status` 映射。
 #[derive(Debug, Default)]
 struct TaskManager {
     inner: Mutex<HashMap<String, TaskInfo>>,
@@ -132,25 +132,11 @@ impl TaskManager {
     ///
     /// 返回值为克隆的 `TaskInfo`，避免在调用方持有互斥锁。
     fn get_task_info(&self, task_id: &str) -> Option<TaskInfo> {
-       let inner = self.inner.lock().ok()?;
-       inner.get(task_id).cloned()
-   }
-}
-    /// 更新任务状态并返回更新后的任务信息快照。
-    ///
-    /// 若任务存在，则更新其 `state` 字段为 `new_state`，同时将 `updated_at`
-    /// 设置为当前 Unix 时间戳（秒），并返回更新后的 `TaskInfo` 克隆。
-    /// 若任务不存在，返回 `None`。
-    fn update_task_state(&self, task_id: &str, new_state: TaskState) -> Option<TaskInfo> {
-       let mut inner = self.inner.lock().ok()?;
-       let info = inner.get_mut(task_id)?;
-       let previous_state = info.state;
-       info.state = new_state;
-       info.updated_at = current_unix_timestamp();
-       // 返回克隆，避免持有锁
-       Some(info.clone())
-   }
-    /// 更新任务状态并返回更新后的任务信息快照。
+        let inner = self.inner.lock().ok()?;
+        inner.get(task_id).cloned()
+    }
+
+    /// 更新任务状态并返回更新前后的状态及任务信息快照。
     ///
     /// 若任务存在，则更新其 `state` 字段为 `new_state`，同时将 `updated_at`
     /// 设置为当前 Unix 时间戳（秒），并返回 `(previous_state, updated_info)` 元组。
@@ -164,6 +150,7 @@ impl TaskManager {
         // 返回克隆，避免持有锁
         Some((previous_state, info.clone()))
     }
+}
 
 /// 全局任务管理器实例
 static TASK_MANAGER: Lazy<TaskManager> = Lazy::new(|| TaskManager::new());
@@ -522,8 +509,8 @@ mod tests {
     }
 
     #[test]
-    fn test_surf_scan_valid_params_still_not_implemented() {
-        // params 结构完整且类型正确时，应视为参数合法，但方法仍未实现 -> METHOD_NOT_FOUND
+    fn test_surf_scan_valid_params_returns_success_and_registers_task() {
+        // params 结构完整且类型正确时，应创建一个排队中的任务并返回成功响应
         let request = r#"{
             "jsonrpc": "2.0",
             "method": "Surf.Scan",
@@ -540,11 +527,29 @@ mod tests {
 
         let response = handle_rpc_line(request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
         assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
-        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
-        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
-        assert_eq!(detail, "method not implemented yet");
+        // 成功路径应返回 result，而不是 error
+        assert!(parsed.get("error").is_none());
+
+        let result = parsed["result"].as_object().expect("result should be an object");
+
+        // task_id 应为非空字符串
+        let task_id = result["task_id"].as_str().expect("task_id should be a string");
+        assert!(!task_id.is_empty());
+
+        // state / path 与请求参数一致
+        assert_eq!(result["state"], "queued");
+        assert_eq!(result["path"], "/tmp");
+
+        // min_size_bytes 按 10MB 解析
+        let expected_min_size = parse_size_for_service("10MB").unwrap();
+        assert_eq!(result["min_size_bytes"].as_u64().unwrap(), expected_min_size);
+
+        // threads / limit 透传
+        assert_eq!(result["threads"].as_u64().unwrap(), 4);
+        assert_eq!(result["limit"].as_u64().unwrap(), 10);
+
         // id 应保留调用方提供的值
         assert_eq!(parsed["id"], 42);
     }

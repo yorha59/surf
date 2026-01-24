@@ -253,25 +253,40 @@
   - 在同一进程中，连续发送多次“启动扫描”“查询进度”“获取结果”请求时，服务保持稳定，不出现崩溃或资源泄漏迹象。
   - 在无请求时，服务进程保持空闲且资源占用在可接受范围内，支持通过常规信号（例如 `Ctrl+C`）优雅退出。
   - impl_notes (iteration 8 / dev-service-api & dev-cli-tui):
-    - `workspaces/dev-service-api/surf-service/src/main.rs` 中的 `surf-service` 二进制，当前已实现较完整的 JSON-RPC 骨架能力：
+    - `workspaces/dev-service-api/surf-service/src/main.rs` 中的 `surf-service` 二进制，当前已实现较完整的 JSON-RPC 骨架能力，并在本轮迭代中引入了最小可用的内存任务管理器：
       - 使用 `clap::Parser` 定义 `Args` 结构体，支持 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位用于后续并发控制）、`--task-ttl-seconds`（默认 600，对应 Architecture.md 中的 `task_ttl_seconds`），并在启动日志中打印当前配置。
       - 基于 `tokio::net::TcpListener` 在 `<host>:<port>` 上启动 TCP 监听；每当接受到新连接时，为该连接启动独立的 async 任务，通过 `handle_connection` 按行读取请求并处理。
-      - 对于每一行入站数据，使用 `handle_rpc_line` 执行 JSON 解析和 JSON-RPC 2.0 校验：
+      - 对于每一行入站数据，使用 `handle_rpc_line` 执行 JSON 解析和 JSON-RPC 2.0 校验及部分业务分发：
         - 空行或仅空白行会被忽略（返回 `None`），仅在 stderr 记录 `empty line skipped` 日志；
         - 无法解析为合法 JSON 时，返回 JSON-RPC 2.0 错误响应，`error.code = -32600 (INVALID_REQUEST)`，`id = null`；
         - 能解析为 JSON 但结构无法反序列化为 `JsonRpcRequest`，同样以 `INVALID_REQUEST` 形式返回；
         - `jsonrpc` 字段存在但不等于 `"2.0"` 时，返回 `INVALID_REQUEST`，并保留原始 `id`；
         - 当 `method` 不在 `SUPPORTED_METHODS = ["Surf.Scan", "Surf.Status", "Surf.GetResults", "Surf.Cancel"]` 中时，返回 `METHOD_NOT_FOUND`，`error.data.detail` 中包含实际方法名；
-        - 当方法名在上述支持列表中但尚未真正实现时，同样返回 `METHOD_NOT_FOUND`，`error.data.detail = "method not implemented yet"`。
+        - 当方法名为 `Surf.Scan` 时：
+          - `params == null` 视为“方法尚未实现”的骨架占位，返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`；
+          - `params` 非对象时返回 `INVALID_PARAMS`，提示需要 JSON 对象；
+          - `params` 为对象时，尝试反序列化为 `SurfScanParams` 并调用 `parse_size_for_service` / `validate_surf_scan_params` 校验 `min_size` 与 `threads`；
+          - 结构或数值非法时返回 `INVALID_PARAMS`；合法时通过全局 `TASK_MANAGER` 注册一个 `TaskInfo`，初始状态为 `queued`，并返回 `SurfScanResult` 成功响应（包含 `task_id`、`state="queued"`、`path`、`min_size_bytes`、`threads`、`limit`）。
+        - 当方法名为 `Surf.Status` 时：
+          - `params == null` 仍视为“列出所有任务”占位能力，返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`；
+          - `params` 非对象时返回 `INVALID_PARAMS`；
+          - `task_id` 字段缺失、为空字符串或类型错误时返回 `INVALID_PARAMS`；
+          - `task_id` 为非空字符串时，尝试从 `TASK_MANAGER` 查询对应任务：存在则返回 `SurfStatusResult` 成功响应（当前进度相关字段使用占位值，`state` 由 `TaskState` 映射为 `queued`/`running`/`completed`/`failed`/`canceled`），不存在则返回 `TASK_NOT_FOUND`；
+        - 当方法名为 `Surf.Cancel` 时：
+          - 当前仅对 `params` 形状与 `task_id` 字段做合法性校验，任意合法但不存在的 `task_id` 一律返回 `TASK_NOT_FOUND`，尚未真正执行状态迁移或调用核心层取消逻辑；
+        - 当方法名为 `Surf.GetResults` 时，仍仅作为错误模型占位，任何调用都返回 `METHOD_NOT_FOUND` + `"method not implemented yet"`。
       - 对于需要返回响应的请求，服务会将 JSON-RPC 错误响应行写回客户端，并在 stderr 打印一条包含 peer 地址、原始请求行与响应内容的日志，便于后续排查协议与调用问题。
       - 文件顶部定义了 `JsonRpcRequest`、`JsonRpcError`、`JsonRpcErrorResponse` 等结构体以及 `INVALID_REQUEST` / `METHOD_NOT_FOUND` 常量，基本与 Architecture.md 4.3.2 中的错误模型保持一致（当前仅实现了部分标准错误码）。
       - 在同一文件的 `#[cfg(test)] mod tests` 中，已针对 `handle_rpc_line` 编写多条单元测试，用于覆盖“无效 JSON”“缺少 `jsonrpc` 字段”“错误版本号”“未知方法”“已知方法但未实现”“空行跳过”等典型场景，确保当前错误处理逻辑在代码层面可回归。
     - `workspaces/dev-cli-tui/surf-cli/src/main.rs` 中，CLI 形态已支持服务模式开关与参数透传：
       - `Args` 定义了 `--service` / `-s` 布尔开关，以及 `--host` / `--port` 参数；当 `--service` 为真时，CLI 调用 `run_service(host, port)` 启动名为 `"surf-service"` 的子进程，并在子进程退出后直接结束当前进程。
       - `run_service` 通过 `Command::new("surf-service").arg("--host").arg(host).arg("--port").arg(port).status()` 启动服务，对子进程启动失败或非零退出码仅打印错误信息到 stderr；当前 CLI 仍仅扮演“本地服务进程启动入口”，尚未提供任何 JSON-RPC 客户端封装或健康检查命令。
-    - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 绑定本地 TCP 监听”“基于行分隔的 JSON-RPC 2.0 请求解析与错误响应骨架”和“针对基础校验逻辑的单元测试”，但仍然只是一个“更完整的 JSON-RPC 服务骨架”，尚未提供任何实际的扫描任务管理或结果查询能力。
-      - `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 四个方法目前仅在错误模型中占位，所有实际请求都会收到 `METHOD_NOT_FOUND` 类型的错误响应；
-      - 尚未引入任务状态机、并发控制、任务 TTL 或与 `workspaces/dev-core-scanner/surf-core` 的集成，也未实现优雅关闭逻辑，因此**当前服务二进制仍不满足本 story 的验收标准**。
+    - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 绑定本地 TCP 监听”“基于行分隔的 JSON-RPC 2.0 请求解析与错误响应骨架”“最小可用的内存任务表（`TaskManager` + `TaskInfo`）”以及围绕 `Surf.Scan`/`Surf.Status`/`Surf.Cancel` 的参数校验与成功/失败单元测试，但仍然只是一个“更完整的 JSON-RPC 服务骨架”，距离可用服务还有明显差距：
+      - `Surf.Scan` 目前只负责在内存中登记任务元数据并返回 `queued` 状态的 `task_id`，尚未真正调用 `workspaces/dev-core-scanner/surf-core` 启动扫描；
+      - `Surf.Status` 能够根据 `task_id` 查询内存任务表并返回占位进度信息，但尚未接入核心进度快照（`scanned_files` / `scanned_bytes` / `total_bytes_estimate` 等字段均为固定值）；
+      - `Surf.Cancel` 尚未真正更新任务状态或触发底层取消，仅在参数合法时对未知任务返回 `TASK_NOT_FOUND`；
+      - `Surf.GetResults` 仍然仅在错误模型中占位，任何调用都会收到 `METHOD_NOT_FOUND` 类型的错误响应；
+      - 尚未引入真实的任务状态机迁移、并发控制、任务 TTL 回收策略或与 `workspaces/dev-core-scanner/surf-core` 的扫描/结果集成，也未实现优雅关闭逻辑，因此**当前服务二进制仍不满足本 story 的验收标准**。
   - remaining_todos:
     - 方向一：任务管理与并发控制（围绕 `max_concurrent_scans` / `task_ttl_seconds` 等参数落地）
       - 在服务进程内引入最小可用的任务管理器：为每个扫描请求分配唯一 `task_id`，维护任务状态（如 Pending / Running / Completed / Failed / Canceled）及必要的元数据/结果引用；
