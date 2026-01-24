@@ -188,6 +188,48 @@ mod tests {
     }
 
     #[test]
+    fn test_surf_scan_params_object_but_invalid_shape() {
+        // params 是对象但缺少必填字段 path -> INVALID_PARAMS
+        let request = r#"{"jsonrpc": "2.0", "method": "Surf.Scan", "params": {"threads": 4}, "id": 1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("invalid Surf.Scan params"));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_scan_valid_params_still_not_implemented() {
+        // params 结构完整且类型正确时，应视为参数合法，但方法仍未实现 -> METHOD_NOT_FOUND
+        let request = r#"{
+            "jsonrpc": "2.0",
+            "method": "Surf.Scan",
+            "params": {
+                "path": "/tmp",
+                "min_size": "10MB",
+                "threads": 4,
+                "limit": 10,
+                "exclude_patterns": ["**/node_modules/**"],
+                "tag": "test"
+            },
+            "id": 42
+        }"#;
+
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "METHOD_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert_eq!(detail, "method not implemented yet");
+        // id 应保留调用方提供的值
+        assert_eq!(parsed["id"], 42);
+    }
+
+    #[test]
     fn test_empty_line_skipped() {
         // 空行应该返回 None
         let response = handle_rpc_line("");
@@ -245,23 +287,48 @@ fn handle_rpc_line(line: &str) -> Option<String> {
     }
 
     // 检查 method 是否为支持的四个方法之一
-    let is_supported = SUPPORTED_METHODS.iter().any(|&m| m == req.method);
-    
-    let error = if is_supported {
-        // 对于支持的方法，检查参数形状是否符合预期（本项目仅使用 named params，即 JSON 对象）
-        if !req.params.is_object() {
-            // params 不是对象（null、数组、字符串、数字等） -> INVALID_PARAMS
-            let detail = format!("params must be a JSON object for method {}", req.method);
-            JsonRpcError::invalid_params(Some(detail))
-        } else {
-            // 参数形状正确，但方法尚未实现 -> METHOD_NOT_FOUND
-            JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
-        }
-    } else {
+    let method = req.method.as_str();
+    let is_supported = SUPPORTED_METHODS.iter().any(|&m| m == method);
+
+    let error = if !is_supported {
         // 不支持的方法 -> METHOD_NOT_FOUND
-        JsonRpcError::method_not_found(Some(format!("method \"{}\" not found", req.method)))
+        JsonRpcError::method_not_found(Some(format!("method \"{}\" not found", method)))
+    } else {
+        match method {
+            // Surf.Scan 对参数形状有更严格的约束：
+            // - 缺少 params（即为 null）时，优先视为“方法尚未实现”的骨架占位；
+            // - params 存在但不是对象 -> INVALID_PARAMS；
+            // - params 为对象时，尝试反序列化为 SurfScanParams，失败则 INVALID_PARAMS，成功则暂时仍返回
+            //   METHOD_NOT_FOUND（扫描任务管理尚未实现）。
+            "Surf.Scan" => {
+                if req.params.is_null() {
+                    // 缺少参数但方法本身受支持：当前仅作为“尚未实现”的占位
+                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                } else if !req.params.is_object() {
+                    // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
+                    let detail = format!("params must be a JSON object for method {}", method);
+                    JsonRpcError::invalid_params(Some(detail))
+                } else {
+                    // params 为对象，尝试解析为 SurfScanParams；解析失败视为 INVALID_PARAMS
+                    match serde_json::from_value::<SurfScanParams>(req.params.clone()) {
+                        Ok(_scan_params) => {
+                            // 参数结构正确，但业务逻辑尚未落地 -> METHOD_NOT_FOUND 占位
+                            JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                        }
+                        Err(e) => {
+                            let detail = format!("invalid Surf.Scan params: {}", e);
+                            JsonRpcError::invalid_params(Some(detail))
+                        }
+                    }
+                }
+            }
+            // 其他支持的方法当前仍仅作为骨架存在：无论是否携带 params，一律返回 METHOD_NOT_FOUND
+            _ => {
+                JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+            }
+        }
     };
-    
+
     let response = JsonRpcErrorResponse::from_error(error, req.id);
     Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()))
 }
