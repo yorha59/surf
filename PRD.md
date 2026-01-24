@@ -231,31 +231,42 @@
   - 在同一进程中，连续发送多次“启动扫描”“查询进度”“获取结果”请求时，服务保持稳定，不出现崩溃或资源泄漏迹象。
   - 在无请求时，服务进程保持空闲且资源占用在可接受范围内，支持通过常规信号（例如 `Ctrl+C`）优雅退出。
   - impl_notes (iteration 8 / dev-service-api & dev-cli-tui):
-    - `workspaces/dev-service-api/surf-service/src/main.rs` 中已存在 `surf-service` 二进制骨架：
-      - 使用 `clap::Parser` 定义 `Args` 结构体，支持 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位用于后续并发控制）、`--task-ttl-seconds`（默认 600，对应 Architecture.md 中的 `task_ttl_seconds`）。
-      - `main` 函数中解析命令行参数并拼出 `<host>:<port>` 监听地址，使用 `tokio::net::TcpListener::bind` 绑定 TCP 端口，启动时打印一行说明性日志，明确当前仅为 "service skeleton"，`Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 等 JSON-RPC 方法尚未实现。
-      - 对每个新建入站连接，只记录一行日志并立即丢弃 socket，不进行任何 JSON-RPC 2.0 请求解析、方法路由或响应编码；错误模型、任务状态机、并发限制及与 `surf-core` 的集成都尚未接入。
+    - `workspaces/dev-service-api/surf-service/src/main.rs` 中的 `surf-service` 二进制，当前已实现较完整的 JSON-RPC 骨架能力：
+      - 使用 `clap::Parser` 定义 `Args` 结构体，支持 `--host`（默认 `127.0.0.1`）、`--port`（默认 `1234`）、`--max-concurrent-scans`（默认 4，占位用于后续并发控制）、`--task-ttl-seconds`（默认 600，对应 Architecture.md 中的 `task_ttl_seconds`），并在启动日志中打印当前配置。
+      - 基于 `tokio::net::TcpListener` 在 `<host>:<port>` 上启动 TCP 监听；每当接受到新连接时，为该连接启动独立的 async 任务，通过 `handle_connection` 按行读取请求并处理。
+      - 对于每一行入站数据，使用 `handle_rpc_line` 执行 JSON 解析和 JSON-RPC 2.0 校验：
+        - 空行或仅空白行会被忽略（返回 `None`），仅在 stderr 记录 `empty line skipped` 日志；
+        - 无法解析为合法 JSON 时，返回 JSON-RPC 2.0 错误响应，`error.code = -32600 (INVALID_REQUEST)`，`id = null`；
+        - 能解析为 JSON 但结构无法反序列化为 `JsonRpcRequest`，同样以 `INVALID_REQUEST` 形式返回；
+        - `jsonrpc` 字段存在但不等于 `"2.0"` 时，返回 `INVALID_REQUEST`，并保留原始 `id`；
+        - 当 `method` 不在 `SUPPORTED_METHODS = ["Surf.Scan", "Surf.Status", "Surf.GetResults", "Surf.Cancel"]` 中时，返回 `METHOD_NOT_FOUND`，`error.data.detail` 中包含实际方法名；
+        - 当方法名在上述支持列表中但尚未真正实现时，同样返回 `METHOD_NOT_FOUND`，`error.data.detail = "method not implemented yet"`。
+      - 对于需要返回响应的请求，服务会将 JSON-RPC 错误响应行写回客户端，并在 stderr 打印一条包含 peer 地址、原始请求行与响应内容的日志，便于后续排查协议与调用问题。
+      - 文件顶部定义了 `JsonRpcRequest`、`JsonRpcError`、`JsonRpcErrorResponse` 等结构体以及 `INVALID_REQUEST` / `METHOD_NOT_FOUND` 常量，基本与 Architecture.md 4.3.2 中的错误模型保持一致（当前仅实现了部分标准错误码）。
+      - 在同一文件的 `#[cfg(test)] mod tests` 中，已针对 `handle_rpc_line` 编写多条单元测试，用于覆盖“无效 JSON”“缺少 `jsonrpc` 字段”“错误版本号”“未知方法”“已知方法但未实现”“空行跳过”等典型场景，确保当前错误处理逻辑在代码层面可回归。
     - `workspaces/dev-cli-tui/surf-cli/src/main.rs` 中，CLI 形态已支持服务模式开关与参数透传：
       - `Args` 定义了 `--service` / `-s` 布尔开关，以及 `--host` / `--port` 参数；当 `--service` 为真时，CLI 调用 `run_service(host, port)` 启动名为 `"surf-service"` 的子进程，并在子进程退出后直接结束当前进程。
-      - `run_service` 通过 `Command::new("surf-service").arg("--host").arg(host).arg("--port").arg(port).status()` 启动服务，对子进程启动失败或非零退出码仅打印错误信息到 stderr；当前 CLI 仅扮演“本地服务进程启动入口”，尚未提供任何 JSON-RPC 客户端封装或健康检查命令。
-    - 相比本 story 的验收标准，现阶段实现只覆盖了“按 host/port 绑定本地 TCP 监听并保持进程存活”的最小骨架能力：
-      - 尚未实现符合 JSON-RPC 2.0 规范的请求/响应处理，也未暴露 `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 等方法，无法完成远程扫描、进度查询或结果获取。
-      - 尚未实现任务管理、并发控制与任务 TTL 等能力，当前服务进程无法维护可查询的任务状态；Ctrl+C 仅依赖运行时默认行为退出，并无专门的优雅关闭逻辑（如清理任务、输出统计等）。
+      - `run_service` 通过 `Command::new("surf-service").arg("--host").arg(host).arg("--port").arg(port).status()` 启动服务，对子进程启动失败或非零退出码仅打印错误信息到 stderr；当前 CLI 仍仅扮演“本地服务进程启动入口”，尚未提供任何 JSON-RPC 客户端封装或健康检查命令。
+    - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 绑定本地 TCP 监听”“基于行分隔的 JSON-RPC 2.0 请求解析与错误响应骨架”和“针对基础校验逻辑的单元测试”，但仍然只是一个“更完整的 JSON-RPC 服务骨架”，尚未提供任何实际的扫描任务管理或结果查询能力。
+      - `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 四个方法目前仅在错误模型中占位，所有实际请求都会收到 `METHOD_NOT_FOUND` 类型的错误响应；
+      - 尚未引入任务状态机、并发控制、任务 TTL 或与 `workspaces/dev-core-scanner/surf-core` 的集成，也未实现优雅关闭逻辑，因此**当前服务二进制仍不满足本 story 的验收标准**。
   - remaining_todos:
-    - 在 `surf-service` 中实现最小可用的 JSON-RPC 2.0 处理框架：
-      - 解析入站连接中的 JSON 文本，请求结构至少包含 `jsonrpc`、`method`、`params`、`id` 字段；
-      - 设计并实现统一的错误模型与日志策略，对协议错误、参数错误、内部错误等给出稳定的错误码与可诊断信息；
-      - 初期可以仅支持 `Surf.Scan` 的 happy path，并为其他方法预留路由分支和占位实现。
-    - 引入最小可用的任务管理器并与 `surf-core` 集成：
-      - 将 `Surf.Scan` 请求映射为对 `workspaces/dev-core-scanner/surf-core` 的一次扫描调用，为每个请求生成唯一 `task_id`；
-      - 在内存中维护任务状态快照（例如 Pending / Running / Completed / Failed / Canceled）及必要的结果引用，使 `Surf.Status` / `Surf.GetResults` 能够通过 `task_id` 查询当前状态与最终结果；
-      - 利用 `--max-concurrent-scans` 与 `--task-ttl-seconds` 参数，为任务执行和结果保留实现基本的并发限制与 TTL 驱逐策略。
-    - 补充服务模式的基础端到端验证路径（可先以手工和简单脚本为主）：
-      - 在本机运行 `surf --service --host 127.0.0.1 --port 1234` 启动服务进程后，使用 `netcat`、`socat` 或自定义小型 CLI 客户端向 `127.0.0.1:1234` 发送 JSON-RPC 请求，验证 `Surf.Scan` → `Surf.Status` → `Surf.GetResults` 的完整闭环；
-      - 在具备网络访问或依赖缓存的环境中，为 `surf-service` 引入最小的集成测试或脚本化验收步骤（例如放在 `workspaces/dev-service-api/surf-service/tests` 或上层 CI 流水线中），覆盖“服务启动失败/成功”“非法 JSON-RPC 请求”“单任务成功闭环”等关键路径。
-    - 在 CLI 与服务模式之间补齐最基础的协同场景：
-      - 评估是否需要在 `surf` CLI 中增加简单的 JSON-RPC 客户端子命令（例如 `surf rpc status --host ... --port ... --task-id ...`），以便在没有 GUI 的环境下也能方便地对服务进行健康检查与任务管理；
-      - 明确该能力是否纳入 `SVC-JSONRPC-001` 的交付范围，或作为后续 story 独立拆分，在 PRD 中更新对应边界说明。
+    - 方向一：任务管理与并发控制（围绕 `max_concurrent_scans` / `task_ttl_seconds` 等参数落地）
+      - 在服务进程内引入最小可用的任务管理器：为每个扫描请求分配唯一 `task_id`，维护任务状态（如 Pending / Running / Completed / Failed / Canceled）及必要的元数据/结果引用；
+      - 基于 `--max-concurrent-scans` 限制同时运行的扫描任务数量，对超出并发上限的请求给出明确的错误或排队语义；
+      - 基于 `--task-ttl-seconds` 为完成/失败任务实现 TTL 回收策略，避免长期堆积在内存中；
+      - 在任务状态管理和并发控制上补充必要的日志与错误码，以便在高并发场景下排查问题。
+    - 方向二：与 `surf-core` 的扫描 API 集成
+      - 将 JSON-RPC 中的 `Surf.Scan` 映射为对 `workspaces/dev-core-scanner/surf-core` 的一次扫描调用，负责构造输入参数并启动实际扫描任务；
+      - 在任务管理器中落地对扫描进度和结果的追踪，使 `Surf.Status` 能够通过 `task_id` 返回任务当前状态和关键指标（进度百分比、已扫描文件数/大小等）；
+      - 为 `Surf.GetResults` 提供结构化结果返回通道（可复用 CLI/单次运行模式中的结果结构或其子集），并在必要时支持分页或裁剪；
+      - 为 `Surf.Cancel` 提供取消正在运行扫描任务的能力（或至少实现“标记为取消并在安全点终止”的语义），并在取消结果中给出可诊断信息。
+    - 方向三：为 JSON-RPC 方法提供初始业务实现与端到端验证路径
+      - 在现有错误处理骨架基础上，为 `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 提供最小可用的业务实现，确保在单机环境下可以完整走通“发起扫描 → 查询进度 → 获取结果/取消”的闭环；
+      - 制定并实现统一的 JSON-RPC 错误模型和日志策略（包括协议错误、业务参数错误、内部错误等），使错误码与 `error.data.detail` 能够为调用方提供稳定且可诊断的信息；
+      - 补充服务模式的基础端到端验证路径（可先以手工和简单脚本为主）：在本机运行 `surf --service --host 127.0.0.1 --port 1234` 启动服务后，使用 `netcat`、`socat` 或自定义小型 CLI 客户端向 `127.0.0.1:1234` 发送 JSON-RPC 请求，覆盖成功/失败及边界场景；
+      - 在具备网络访问或依赖缓存的环境中，为 `surf-service` 引入最小的集成测试或脚本化验收步骤（例如放在 `workspaces/dev-service-api/surf-service/tests` 或上层 CI 流水线中），确保上述端到端路径可在 CI 中自动回归；
+      - 继续评估是否需要在 `surf` CLI 中增加简单的 JSON-RPC 客户端子命令（例如 `surf rpc status --host ... --port ... --task-id ...`），以便在没有 GUI 的环境下也能完成健康检查与任务管理；如纳入本 story，则在实现与测试完成后更新本节验收标准，否则在后续 story 中单独拆分并在 PRD 中补充边界说明。
 
 ### 9.3 待确认问题
 
