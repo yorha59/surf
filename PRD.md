@@ -286,7 +286,7 @@
       - `Args` 定义了 `--service` / `-s` 开关以及 `--host` / `--port` 参数，当用户执行 `surf --service --host <host> --port <port>` 时，CLI 会调用 `run_service(host, port)` 启动名为 `"surf-service"` 的子进程，并将 `--host` / `--port` 透传给服务进程；
       - `run_service` 对子进程启动失败或非零退出码仅打印错误信息到 stderr 并以相应退出码结束当前 CLI 进程，不承担任何 JSON-RPC 客户端或健康检查逻辑，仅作为“本地服务进程启动入口”。
     - 与本 story 的验收标准相比，当前实现已经具备“按 host/port 启动本地 JSON-RPC 监听”“通过 `Surf.Scan` 真正启动核心扫描并在任务表中保存 `ScanHandle`”“通过 `Surf.Status` 反映真实扫描进度（在 `total_bytes_estimate` 为 `None` 时退化为仅返回已扫描文件数与字节数）”“通过 `Surf.Cancel` 在状态迁移为 `Canceled` 时调用 `surf_core::cancel(handle)` 发出取消信号”以及基础的单元测试覆盖；但仍存在以下差距：
-      - `Surf.GetResults` 仍统一返回 `METHOD_NOT_FOUND`（错误详情为 `"method not implemented yet"`），尚无任何结果返回路径；
+      - `Surf.GetResults` 在本轮（iteration 50）已接入参数校验与任务状态机：当 `params` 不是对象或 `mode` 为除缺省/`"flat"`/`"summary"` 之外的值时返回 `INVALID_PARAMS`；当目标任务不存在时返回 `TASK_NOT_FOUND`；当任务存在但状态不是 `completed` 时同样返回 `INVALID_PARAMS`，错误详情中带有当前状态值。对 `state = completed` 的任务，目前仍仅返回占位性的结果结构（`total_files = 0`、`total_bytes = 0`、`entries = []`），尚未与 `surf-core::collect_results` 或聚合层打通真正的 TopN/汇总数据；相应地，测试模块已新增覆盖上述典型路径的用例，但**story 仍视为 `pending`，直到完整结果聚合与端到端验收路径落地为止**；
       - 任务状态机目前仅在 `SurfStatusResult::from_task_info` 中通过 `surf_core::poll_status(&handle)` 做**惰性更新**：当底层扫描 `done == true` 且任务状态仍为 `Running` 时，会根据 `StatusSnapshot.error` 将任务迁移为 `Completed` 或 `Failed` 并回写到 `TASK_MANAGER`；尚未引入独立的后台轮询/调度协程来周期性刷新所有运行中任务，也未在任务表中记录更细粒度的失败原因摘要；
       - `--max-concurrent-scans` 与 `--task-ttl-seconds` 仍未参与实际并发控制与 TTL 回收，服务在高并发与长期运行场景下的资源边界未被约束；
       - 目前仍缺少以 `surf-service` 实际二进制（可由 `surf --service` 启动）为入口的端到端验收路径，尚无法系统性验证“多次发起扫描 → 查询进度 → 获取结果/取消”的完整闭环，因此**本 story 的 `status` 仍保持为 `pending`**。

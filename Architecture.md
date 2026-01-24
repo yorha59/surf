@@ -489,6 +489,8 @@
     - `error.data.detail` 示例：`"task is not in completed state (current: running)"`，实现时可带上当前状态值，便于客户端区分。
     - 未来如需支持进行中任务的部分结果（partial TopN），将在后续迭代中以**协议扩展**形式引入（如新增 mode 或参数），不影响本阶段既有行为；该能力不在当前 MVP 范围内。
 
+> 实现进度注记（iteration 50 / dev-service-api）：当前 `Surf.GetResults` 已按本小节约定实现参数校验与任务状态机集成，但尚未真正接入 `surf-core::collect_results` 与聚合层：当任务处于 `completed` 状态时，服务端仅返回占位性的聚合结果（`total_files = 0`、`total_bytes = 0`、`entries = []`），实际 TopN 列表与统计数据将在后续迭代中补全；客户端在本阶段应将 `entries` 视为“可能为空”的试验性字段，而以任务生命周期与 `Surf.Status` 进度为主。
+
 - **与 `surf-core` / 数据聚合层的边界**：
   - 服务层仅缓存**聚合后的结果视图**（如 TopN 列表、总文件数与总大小等），不长期持有完整文件列表。
   - 扫描完成后，`surf-core` + Data Aggregator 产出一次性的结果结构体；服务层将其转换为可序列化的中间结构并保存在内存中，供 `Surf.GetResults` 多次读取。

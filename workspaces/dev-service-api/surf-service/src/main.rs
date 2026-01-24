@@ -12,16 +12,16 @@ use num_cpus;
 use std::path::PathBuf;
 use surf_core;
 
-/// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务（当前为「增强骨架实现」）。
+/// Surf 服务进程：提供基于 JSON-RPC 的磁盘扫描服务。
 ///
 /// 当前版本已经具备：
 /// - 命令行参数解析（host/port/max-concurrent-scans/task-ttl-seconds 等），与 PRD / Architecture 中的约定对齐；
 /// - 启动 TCP 监听并按连接拆分异步任务，按行读取 JSON-RPC 请求；
 /// - 对所有 JSON-RPC 请求做结构与版本校验，统一使用 JSON-RPC 2.0 错误模型；
-/// - 针对 `Surf.Scan`：解析/校验参数（含 `min_size` 单位与 `threads` 下限），在内存中登记任务元数据并返回 `task_id` 与 `queued` 状态；
-/// - 针对 `Surf.Status`：支持查询单个任务或列出所有处于非终止态（queued/running）的任务，返回最小可用的进度占位信息；
-/// - 针对 `Surf.Cancel`：校验 `task_id` 并基于内存任务表执行幂等取消语义；
-/// - 对于 `Surf.GetResults` 以及与 `surf-core` 的实际扫描/进度/结果集成仍未实现，当前仅提供错误模型与任务元数据骨架。
+/// - 针对 `Surf.Scan`：解析/校验参数（含 `min_size` 单位与 `threads` 下限），构造 `surf_core::ScanConfig` 并调用 `surf_core::start_scan` 启动实际扫描任务，将返回的 `ScanHandle` 保存到任务表中；
+/// - 针对 `Surf.Status`：支持查询单个任务或列出所有处于非终止态（queued/running）的任务，结合 `surf_core::poll_status` 返回实时进度信息，并在底层扫描结束后惰性推进任务状态（running → completed/failed）；
+/// - 针对 `Surf.Cancel`：校验 `task_id` 并通过 `TASK_MANAGER.cancel_task` 触发任务状态迁移及 `surf_core::cancel` 调用，实现幂等取消；
+/// - 针对 `Surf.GetResults`：实现了参数与任务状态校验，仅在任务处于 `completed` 状态时返回占位性的聚合结果结构（total_files/total_bytes 为 0，entries 为空数组），真实结果聚合与缓存仍在后续迭代中补充。
 ///
 /// 参数结构体 `Args` 的 Clap 属性定义见文件靠后的 `struct Args`。
 /// JSON-RPC 2.0 标准错误码（部分）
@@ -1222,6 +1222,104 @@ mod tests {
         assert!(info2.started_at > 0);
         assert!(info2.updated_at >= info2.started_at);
     }
+
+    #[test]
+    fn test_surf_getresults_params_not_object_invalid_params() {
+        // params 是数组而不是对象 -> INVALID_PARAMS
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":[],"id":1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("params must be a JSON object for method Surf.GetResults"));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_getresults_unsupported_mode_invalid_params() {
+        // 不支持的 mode 值应返回 INVALID_PARAMS
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":{"task_id":"t1","mode":"unknown"},"id":2}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("unsupported mode"));
+        assert_eq!(parsed["id"], 2);
+    }
+
+    #[test]
+    fn test_surf_getresults_task_not_found() {
+        // 合法参数但 task_id 不存在 -> TASK_NOT_FOUND
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.GetResults","params":{"task_id":"non-existent"},"id":3}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "TASK_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id not found: non-existent"));
+        assert_eq!(parsed["id"], 3);
+    }
+
+    #[test]
+    fn test_surf_getresults_task_not_completed_invalid_params() {
+        // 任务存在但未处于 Completed 状态 -> INVALID_PARAMS
+        let task_id = TASK_MANAGER.register_task(
+            "/tmp/getresults-running".to_string(),
+            0,
+            1,
+            None,
+            Some("getresults-running".to_string()),
+            TaskState::Running,
+        );
+
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.GetResults\",\"params\":{{\"task_id\":\"{}\"}},\"id\":4}}",
+            task_id
+        );
+        let response = handle_rpc_line(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task is not in completed state"));
+        assert!(detail.contains("running"));
+        assert_eq!(parsed["id"], 4);
+    }
+
+    #[test]
+    fn test_surf_getresults_completed_task_returns_placeholder_result() {
+        // 对于 Completed 状态的任务，应返回占位性的聚合结果结构
+        let task_id = TASK_MANAGER.register_task(
+            "/tmp/getresults-completed".to_string(),
+            0,
+            1,
+            None,
+            Some("getresults-completed".to_string()),
+            TaskState::Completed,
+        );
+
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.GetResults\",\"params\":{{\"task_id\":\"{}\"}},\"id\":5}}",
+            task_id
+        );
+        let response = handle_rpc_line(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert!(parsed.get("error").is_none());
+        assert_eq!(parsed["id"], 5);
+
+        let result = parsed["result"].as_object().expect("result should be an object");
+        assert_eq!(result["task_id"].as_str().unwrap(), task_id);
+        assert_eq!(result["state"].as_str().unwrap(), "completed");
+        assert_eq!(result["path"].as_str().unwrap(), "/tmp/getresults-completed");
+        assert_eq!(result["total_files"].as_u64().unwrap(), 0);
+        assert_eq!(result["total_bytes"].as_u64().unwrap(), 0);
+        let entries = result["entries"].as_array().expect("entries should be an array");
+        assert!(entries.is_empty());
+    }
 }
 
 impl JsonRpcErrorResponse {
@@ -1508,6 +1606,92 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                 // task_id 既不是 string 也不是 null -> INVALID_PARAMS
                                 let detail = "task_id must be a string".to_string();
                                 JsonRpcError::invalid_params(Some(detail))
+                            }
+                        }
+                    }
+                }
+            }
+            "Surf.GetResults" => {
+                // 根据 Architecture.md 4.3.5，对 Surf.GetResults 进行参数与状态校验。
+                // 当前仅返回占位性的聚合结果（total_files/total_bytes 为 0，entries 为空），
+                // 真正的结果聚合与缓存将在后续迭代中实现。
+                if req.params.is_null() || !req.params.is_object() {
+                    let detail = format!(
+                        "params must be a JSON object for method {}",
+                        method
+                    );
+                    JsonRpcError::invalid_params(Some(detail))
+                } else {
+                    // params 为对象，尝试解析为 SurfGetResultsParams
+                    match serde_json::from_value::<SurfGetResultsParams>(req.params.clone()) {
+                        Err(e) => {
+                            let detail = format!("invalid Surf.GetResults params: {}", e);
+                            JsonRpcError::invalid_params(Some(detail))
+                        }
+                        Ok(get_params) => {
+                            // 仅支持 mode 缺省或 "flat"/"summary"，其他取值视为无效
+                            if let Some(ref mode) = get_params.mode {
+                                let mode_lc = mode.to_lowercase();
+                                if mode_lc != "flat" && mode_lc != "summary" {
+                                    let detail = format!(
+                                        "unsupported mode for Surf.GetResults: {}",
+                                        mode
+                                    );
+                                    return Some(
+                                        serde_json::to_string(&JsonRpcErrorResponse::from_error(
+                                            JsonRpcError::invalid_params(Some(detail)),
+                                            req.id,
+                                        ))
+                                        .unwrap_or_else(|_| String::new()),
+                                    );
+                                }
+                            }
+
+                            // 查询任务信息
+                            match TASK_MANAGER.get_task_info(&get_params.task_id) {
+                                None => {
+                                    let detail = format!(
+                                        "task_id not found: {}",
+                                        get_params.task_id
+                                    );
+                                    JsonRpcError::task_not_found(Some(detail))
+                                }
+                                Some(info) => {
+                                    // 仅在任务已处于 Completed 状态时返回结果；其他状态一律视为
+                                    // INVALID_PARAMS，与 Architecture.md 4.3.5 中的约定对齐。
+                                    if info.state != TaskState::Completed {
+                                        let state_str = match info.state {
+                                            TaskState::Queued => "queued",
+                                            TaskState::Running => "running",
+                                            TaskState::Completed => "completed",
+                                            TaskState::Failed => "failed",
+                                            TaskState::Canceled => "canceled",
+                                        };
+                                        let detail = format!(
+                                            "task is not in completed state (current: {})",
+                                            state_str
+                                        );
+                                        JsonRpcError::invalid_params(Some(detail))
+                                    } else {
+                                        // 当前版本尚未集成真实的聚合结果，仅返回占位数据：
+                                        // - total_files/total_bytes: 0
+                                        // - entries: 空数组
+                                        let result = SurfGetResultsResult {
+                                            task_id: get_params.task_id,
+                                            state: "completed".to_string(),
+                                            path: info.path,
+                                            total_files: 0,
+                                            total_bytes: 0,
+                                            entries: Vec::new(),
+                                        };
+                                        let success_response =
+                                            JsonRpcSuccessResponse::from_result(result, req.id);
+                                        return Some(
+                                            serde_json::to_string(&success_response)
+                                                .unwrap_or_else(|_| String::new()),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
