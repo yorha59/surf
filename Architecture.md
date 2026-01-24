@@ -571,3 +571,98 @@
   - 从 `workspaces/dev-macos-gui/` 获取打包好的 `Surf.app` 及必要的启动脚本。
   - 从 `workspaces/dev-persistence/` 获取迁移脚本或初始化数据库逻辑说明。
 - `delivery-runner` 在自己的交付工作区 `release/` 下，按平台与形态（CLI/TUI/Service/GUI）组织最终发布产物，并在 `test/` 目录下基于 PRD 8. 验收标准设计和执行独立测试。
+
+- 为支持自动化交付，本节补充如下**构建命令与产物布局约定**，供交付节点与各开发 Agent 对齐。
+
+- **各工作区本地构建约定（Rust 部分）**
+  - `dev-cli-tui`（工作区根：`workspaces/dev-cli-tui/`）
+    - 目标 crate：`surf-cli`，bin 名称：`surf`。
+    - 推荐在 `workspaces/dev-cli-tui/surf-cli/` 下执行：
+      - `cargo build --release`
+    - 预期产物（相对 `workspaces/dev-cli-tui/surf-cli/`）：
+      - 可执行文件：`target/release/surf`
+    - 如在仓库根目录统一构建，可使用：
+      - `cargo build -p surf-cli --release`（产物路径保持为根目录下 `target/release/surf`）。
+
+  - `dev-service-api`（工作区根：`workspaces/dev-service-api/`）
+    - 目标 crate：`surf-service`，bin 名称：`surf-service`。
+    - 推荐在 `workspaces/dev-service-api/surf-service/` 下执行：
+      - `cargo build --release`
+    - 预期产物（相对 `workspaces/dev-service-api/surf-service/`）：
+      - 可执行文件：`target/release/surf-service`
+    - 如在仓库根目录统一构建，可使用：
+      - `cargo build -p surf-service --release`（产物路径为根目录下 `target/release/surf-service`）。
+
+  - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
+    - 目标 crate：`surf-core`，类型：库 crate。
+    - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
+      - `cargo build --release`
+    - 预期产物：
+      - 库文件：位于 `target/release/` 下的 `libsurf_core*` 相关文件（具体文件名由平台与 Rust 目标三元组决定）。
+    - 交付语义：`surf-core` **不直接作为独立二进制在交付阶段暴露**，而是在构建 `surf` / `surf-service` 时作为依赖被一并编译和链接；交付节点只需关心最终 CLI / Service 二进制是否能在目标平台上独立运行。
+
+- **交付工作区 `release/` 目录布局建议**（示例）
+
+  > 交付节点自身的工作区位于仓库根目录下，以下路径均以仓库根为基准；平台命名遵循 `os-arch` 约定，可根据实际需要扩展（如添加 `linux-aarch64`、`macos-aarch64` 等）。
+
+  ```text
+  release/
+    linux-x86_64/
+      cli/
+        surf              # 由 dev-cli-tui 构建产物复制/链接而来
+      service/
+        surf-service      # 由 dev-service-api 构建产物复制/链接而来
+      gui/
+        # TODO: 预留 Linux GUI 形态占位（当前 PRD 不要求实现）
+
+    macos-x86_64/
+      cli/
+        surf
+      service/
+        surf-service
+      gui/
+        Surf.app          # TODO: dev-macos-gui 工作区构建完成后，由交付节点从其工作区复制
+
+    macos-aarch64/
+      cli/
+        surf              # 如实际交付为通用二进制，可使用统一构建产物
+      service/
+        surf-service
+      gui/
+        Surf.app          # 同上，预留 Apple Silicon 形态
+  ```
+
+  - `delivery-runner` 在进入交付阶段时，应根据当前目标平台（或编译矩阵）决定需要构建的组合，并：
+    - 调用对应工作区构建命令（例如：
+      - `cd workspaces/dev-cli-tui/surf-cli && cargo build --release`
+      - `cd workspaces/dev-service-api/surf-service && cargo build --release`
+      ）；
+    - 将 `target/release/surf` 与 `target/release/surf-service` 拷贝或通过符号链接方式布置到上表中的 `release/<platform>/cli/` 与 `release/<platform>/service/` 目录；
+    - 对于未来的 `dev-macos-gui`、`dev-persistence`：
+      - `dev-macos-gui` 产物 `Surf.app` 由其工作区的 Tauri 构建命令产出，交付阶段仅负责复制到对应 `release/<platform>/gui/`；
+      - `dev-persistence` 相关迁移脚本或初始化 SQL 文件可统一放置在 `release/<platform>/service/migrations/` 等子目录下，具体命名在引入该工作区时补充（当前仅占位）。
+
+- **`test/` 目录与 PRD 8. 验收标准的对应关系（结构约定）**
+
+  > 交付工作区下的 `test/` 目录用于组织端到端验收测试资产，其结构与 PRD 8 各子章节（CLI / 服务模式 / TUI / macOS GUI / 非功能性）一一对应。仅定义结构与示例命令形式，具体测试内容由测试/交付节点在后续实现。
+
+  ```text
+  test/
+    case.md              # 文档化测试用例清单，与 PRD 8 条目做双向映射
+    scripts/
+      cli_oneoff_basic.sh        # 覆盖“CLI / 单次运行模式”基础验收
+      cli_json_mode.sh           # 覆盖 `--json` 行为与 stdout/stderr 语义
+      service_jsonrpc_basic.sh   # 覆盖服务模式启动与基本 JSON-RPC 交互
+      tui_basic_navigation.sh    # 覆盖 TUI 导航与删除确认流程
+      macos_gui_onboarding.sh    # TODO：覆盖 macOS GUI Onboarding 与权限申请
+      nonfunc_perf_smoke.sh      # TODO：覆盖大目录扫描下的性能与资源占用
+  ```
+
+  - 上述脚本应以 `release/` 中的实际交付产物为入口，例如：
+    - `./release/linux-x86_64/cli/surf --path <dir> ...`
+    - `./release/linux-x86_64/service/surf-service --host 127.0.0.1 --port 1234 --max-concurrent-scans 4 ...`
+  - `test/case.md` 推荐最少包含以下信息列，以保证与 PRD 8 的可追溯性：
+    - `id`：测试用例标识，例如 `AC-CLI-ONEOFF-001`；
+    - `prd_ref`：对应的 PRD 条目（如 `8. CLI / 单次运行模式`、`CLI-ONEOFF-003` 等）；
+    - `script`：关联的脚本文件名与参数示例；
+    - `expected`：高层预期结果摘要（如“进程退出码为 0，输出列表按大小降序排序”）。
