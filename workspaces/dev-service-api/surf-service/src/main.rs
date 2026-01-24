@@ -498,6 +498,64 @@ mod tests {
         assert_eq!(detail, "method not implemented yet");
         assert_eq!(parsed["id"], 5);
     }
+
+    #[test]
+    fn test_surf_cancel_params_not_object_invalid_params() {
+        // 构造请求：params 是数组而不是对象
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":[],"id":1}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        assert_eq!(parsed["error"]["message"], "INVALID_PARAMS");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("params must be a JSON object for method Surf.Cancel"));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[test]
+    fn test_surf_cancel_missing_or_bad_task_id_invalid_params() {
+        // 缺少 task_id 字段
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{},"id":2}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a non-empty string"));
+        assert_eq!(parsed["id"], 2);
+
+        // task_id 为数字而不是字符串
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":42},"id":3}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a string"));
+        assert_eq!(parsed["id"], 3);
+
+        // task_id 为空字符串
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":""},"id":4}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], INVALID_PARAMS);
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id must be a non-empty string"));
+        assert_eq!(parsed["id"], 4);
+    }
+
+    #[test]
+    fn test_surf_cancel_task_not_found_for_unknown_id() {
+        // 合法的非空 task_id，目前一律视为不存在任务 -> TASK_NOT_FOUND
+        let request = r#"{"jsonrpc":"2.0","method":"Surf.Cancel","params":{"task_id":"non-existent"},"id":5}"#;
+        let response = handle_rpc_line(request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["error"]["code"], TASK_NOT_FOUND);
+        assert_eq!(parsed["error"]["message"], "TASK_NOT_FOUND");
+        let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
+        assert!(detail.contains("task_id not found: non-existent"));
+        assert_eq!(parsed["id"], 5);
+    }
 }
 
 impl JsonRpcErrorResponse {
@@ -632,6 +690,44 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                             } else {
                                 // task_id 既不是 string 也不是 null -> INVALID_PARAMS
                                 let detail = "task_id must be a string or null".to_string();
+                                JsonRpcError::invalid_params(Some(detail))
+                            }
+                        }
+                    }
+                }
+            }
+            "Surf.Cancel" => {
+                if req.params.is_null() {
+                    // 缺少参数但方法本身受支持：当前仅作为“尚未实现”的占位
+                    JsonRpcError::method_not_found(Some("method not implemented yet".to_string()))
+                } else if !req.params.is_object() {
+                    // params 不是对象（数组/字符串/数字等） -> INVALID_PARAMS
+                    let detail = format!("params must be a JSON object for method {}", method);
+                    JsonRpcError::invalid_params(Some(detail))
+                } else {
+                    // params 为对象，检查 task_id 字段
+                    let obj = req.params.as_object().unwrap();
+                    match obj.get("task_id") {
+                        None => {
+                            // 缺少 task_id -> INVALID_PARAMS
+                            let detail = "task_id must be a non-empty string".to_string();
+                            JsonRpcError::invalid_params(Some(detail))
+                        }
+                        Some(v) => {
+                            if v.is_string() {
+                                let task_id_str = v.as_str().unwrap();
+                                if task_id_str.is_empty() {
+                                    // 空字符串视为无效参数
+                                    let detail = "task_id must be a non-empty string".to_string();
+                                    JsonRpcError::invalid_params(Some(detail))
+                                } else {
+                                    // 当前尚未实现任务管理器：任何非空字符串一律视为不存在任务
+                                    let detail = format!("task_id not found: {}", task_id_str);
+                                    JsonRpcError::task_not_found(Some(detail))
+                                }
+                            } else {
+                                // task_id 既不是 string 也不是 null -> INVALID_PARAMS
+                                let detail = "task_id must be a string".to_string();
                                 JsonRpcError::invalid_params(Some(detail))
                             }
                         }
