@@ -237,12 +237,12 @@ impl TaskManager {
         let mut inner = self.inner.lock().map_err(|_| {
             JsonRpcError::invalid_params(Some("task manager mutex poisoned".to_string()))
         })?;
-        
+
         let info = inner.get_mut(task_id).ok_or_else(|| {
             let detail = format!("task_id not found: {}", task_id);
             JsonRpcError::task_not_found(Some(detail))
         })?;
-        
+
         // 检查状态：仅当 Completed 时才返回结果
         if info.state != TaskState::Completed {
             let state_str = match info.state {
@@ -255,41 +255,46 @@ impl TaskManager {
             let detail = format!("task is not in completed state (current: {})", state_str);
             return Err(JsonRpcError::invalid_params(Some(detail)));
         }
-        
+
         // 如果已有缓存，直接返回
         if let Some(ref cached) = info.aggregated_result {
-            return Ok(CollectedResults { path: info.path.clone(), limit: info.limit, aggregated_result: cached.clone() });
+            return Ok(CollectedResults {
+                path: info.path.clone(),
+                limit: info.limit,
+                aggregated_result: cached.clone(),
+            });
         }
-        
+
         // 否则，需要收集结果
         // 取出 scan_handle（消费所有权）
         let scan_handle = info.scan_handle.take();
         let entries = match scan_handle {
-            Some(handle) => {
-                match surf_core::collect_results(handle) {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        // 收集失败，将任务状态更新为 Failed
-                        info.state = TaskState::Failed;
-                        info.updated_at = current_unix_timestamp();
-                        // 记录错误信息（可选）
-                        let detail = format!("failed to collect results: {}", e);
-                        return Err(JsonRpcError::invalid_params(Some(detail)));
-                    }
+            Some(handle) => match surf_core::collect_results(handle) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    // 收集失败，将任务状态更新为 Failed
+                    info.state = TaskState::Failed;
+                    info.updated_at = current_unix_timestamp();
+                    // 记录错误信息（可选）
+                    let detail = format!("failed to collect results: {}", e);
+                    return Err(JsonRpcError::invalid_params(Some(detail)));
                 }
-            }
+            },
             None => {
                 // 没有 handle，可能已经被消费过，但缓存缺失（不应该发生）
                 // 返回内部错误
-                let detail = format!("internal error: scan handle missing for completed task {}", task_id);
+                let detail = format!(
+                    "internal error: scan handle missing for completed task {}",
+                    task_id
+                );
                 return Err(JsonRpcError::invalid_params(Some(detail)));
             }
         };
-        
+
         // 计算总文件数和总字节数
         let total_files = entries.len() as u64;
         let total_bytes = entries.iter().map(|e| e.size).sum();
-        
+
         // 转换为 AggregatedEntry 列表（注意 limit 将在上层应用）
         let aggregated_entries: Vec<AggregatedEntry> = entries
             .into_iter()
@@ -299,17 +304,21 @@ impl TaskManager {
                 is_dir: false, // 当前核心仅返回文件
             })
             .collect();
-        
+
         let aggregated_result = AggregatedResult {
             total_files,
             total_bytes,
             entries: aggregated_entries,
         };
-        
+
         // 缓存结果
         info.aggregated_result = Some(aggregated_result.clone());
-        
-        Ok((aggregated_result, info.limit))
+
+        Ok(CollectedResults {
+            path: info.path.clone(),
+            limit: info.limit,
+            aggregated_result,
+        })
     }
 
     /// 列出所有处于非终止态的任务（queued/running）。
@@ -1805,34 +1814,41 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                             }
                             // 使用新的结果收集方法
                             match TASK_MANAGER.collect_results_if_needed(&get_params.task_id) {
-                                Ok((aggregated_result, task_limit)) => {
+                                Ok(collected) => {
                                     // 确定最终 limit：优先使用请求中的 limit，否则使用任务本身的 limit
-                                    let effective_limit = get_params.limit.or(task_limit);
-                                    
+                                    let effective_limit = get_params.limit.or(collected.limit);
+
                                     // 根据 mode 构建响应
-                                    let mode = get_params.mode.as_deref().unwrap_or("flat").to_lowercase();
+                                    let mode =
+                                        get_params.mode.as_deref().unwrap_or("flat").to_lowercase();
                                     let entries = if mode == "summary" {
                                         // summary 模式：不返回 entries
                                         Vec::new()
                                     } else {
                                         // flat 模式：应用 limit 截断
                                         match effective_limit {
-                                            Some(limit) if limit < aggregated_result.entries.len() => {
-                                                aggregated_result.entries[..limit].to_vec()
+                                            Some(limit)
+                                                if limit < collected.aggregated_result.entries.len() =>
+                                            {
+                                                collected.aggregated_result.entries[..limit].to_vec()
                                             }
-                                            _ => aggregated_result.entries.clone(),
+                                            _ => collected.aggregated_result.entries.clone(),
                                         }
                                     };
-                                    
+
                                     let result = SurfGetResultsResult {
                                         task_id: get_params.task_id,
                                         state: "completed".to_string(),
-                                        path: aggregated_result.total_files.to_string(), // 注意：这里应该是任务的 path，但 aggregated_result 没有存储 path。我们需要从 info 中获取 path。
-                                        total_files: aggregated_result.total_files,
-                                        total_bytes: aggregated_result.total_bytes,
-                                        entries: entries.into_iter().map(|entry| {
-                                            serde_json::to_value(entry).unwrap_or_else(|_| serde_json::Value::Null)
-                                        }).collect(),
+                                        path: collected.path,
+                                        total_files: collected.aggregated_result.total_files,
+                                        total_bytes: collected.aggregated_result.total_bytes,
+                                        entries: entries
+                                            .into_iter()
+                                            .map(|entry| {
+                                                serde_json::to_value(entry)
+                                                    .unwrap_or_else(|_| serde_json::Value::Null)
+                                            })
+                                            .collect(),
                                     };
                                     let success_response =
                                         JsonRpcSuccessResponse::from_result(result, req.id);
@@ -1844,7 +1860,10 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                 Err(err) => {
                                     // 错误已经由 collect_results_if_needed 构造好
                                     let response = JsonRpcErrorResponse::from_error(err, req.id);
-                                    return Some(serde_json::to_string(&response).unwrap_or_else(|_| String::new()));
+                                    return Some(
+                                        serde_json::to_string(&response)
+                                            .unwrap_or_else(|_| String::new()),
+                                    );
                                 }
                             }
                         }
