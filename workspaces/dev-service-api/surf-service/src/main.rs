@@ -67,11 +67,11 @@ struct TaskInfo {
     state: TaskState,
 }
 
-/// 内存中的简单任务管理器骨架。
-///
-/// - 当前仅负责分配任务 ID 并记录 `TaskInfo` 元数据；
-/// - 后续迭代会在此基础上补充对 `surf-core::ScanHandle` 的持有与进度快照，
-///   以便真正实现 Architecture.md 4.3.7 所描述的任务生命周期与 `Surf.Status` 映射。
+    /// 内存中的简单任务管理器骨架。
+    ///
+    /// - 当前负责分配任务 ID 并记录 `TaskInfo` 元数据；
+    /// - 后续迭代会在此基础上补充对 `surf-core::ScanHandle` 的持有与进度快照，
+    ///   以便真正实现 Architecture.md 4.3.7 所描述的任务生命周期与 `Surf.Status` 映射。
 #[derive(Debug, Default)]
 struct TaskManager {
     inner: Mutex<HashMap<String, TaskInfo>>,
@@ -200,6 +200,31 @@ struct SurfScanResult {
     /// TopN 限制（可选，若为 None 则序列化为 null）
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<usize>,
+}
+
+/// Surf.Status 方法的成功响应结果结构体
+///
+/// 当前仅针对已有的单个任务查询返回最小可用信息：
+/// - 任务 ID
+/// - 状态（queued/running/completed/failed/canceled）
+/// - 进度相关字段使用占位值（queued 任务视为 0）
+///
+/// 后续在接入 `surf-core` 的进度快照后，可在不破坏字段语义的前提下
+/// 补充真实的 `scanned_files` / `scanned_bytes` 等数据。
+#[derive(Debug, Serialize)]
+struct SurfStatusResult {
+    task_id: String,
+    state: String,
+    /// 估算进度（0.0 ~ 1.0），当前 queued 任务统一视为 0.0。
+    progress: f64,
+    scanned_files: u64,
+    scanned_bytes: u64,
+    /// 当前仍无法估算总字节数，使用 null 表示。
+    total_bytes_estimate: Option<u64>,
+    started_at: u64,
+    updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
 }
 
 /// JSON-RPC 错误对象（对应 error 字段）
@@ -620,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_surf_status_task_not_found_for_unknown_id() {
-        // 请求一个不存在的 task_id
+        // 请求一个不存在的 task_id 应返回 TASK_NOT_FOUND
         let request = r#"{"jsonrpc":"2.0","method":"Surf.Status","params":{"task_id":"non-existent"},"id":3}"#;
         let response = handle_rpc_line(request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -630,6 +655,50 @@ mod tests {
         let detail = parsed["error"]["data"]["detail"].as_str().unwrap();
         assert!(detail.contains("task_id not found: non-existent"));
         assert_eq!(parsed["id"], 3);
+    }
+
+    #[test]
+    fn test_surf_status_returns_success_for_existing_task() {
+        // 先通过全局 TASK_MANAGER 注册一个任务
+        let task_id = TASK_MANAGER.register_task(
+            "/tmp".to_string(),
+            0,
+            4,
+            Some(10),
+            Some("status-test".to_string()),
+            TaskState::Queued,
+        );
+
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"Surf.Status\",\"params\":{{\"task_id\":\"{}\"}},\"id\":7}}",
+            task_id
+        );
+
+        let response = handle_rpc_line(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        // 成功路径应返回 result，而不是 error
+        assert!(parsed.get("error").is_none());
+
+        let result = parsed["result"].as_object().expect("result should be an object");
+        assert_eq!(result["task_id"], task_id);
+        assert_eq!(result["state"], "queued");
+
+        // 进度相关字段当前为占位值
+        assert_eq!(result["progress"].as_f64().unwrap(), 0.0);
+        assert_eq!(result["scanned_files"], 0);
+        assert_eq!(result["scanned_bytes"], 0);
+        assert!(result["total_bytes_estimate"].is_null());
+
+        // 时间戳字段应为正数
+        assert!(result["started_at"].as_u64().unwrap() > 0);
+        assert!(result["updated_at"].as_u64().unwrap() >= result["started_at"].as_u64().unwrap());
+
+        // tag 字段应与注册时一致
+        assert_eq!(result["tag"].as_str().unwrap(), "status-test");
+
+        assert_eq!(parsed["id"], 7);
     }
 
     #[test]
@@ -885,10 +954,14 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                     }
                 }
             }
-            // Surf.Status 对参数形状有基本校验，但暂不实现真正的任务查询逻辑：
-            // - params 为 null 时，视为“方法尚未实现”的骨架占位；
+            // Surf.Status 对参数形状有基本校验，并在 task_id 为非空字符串时
+            // 尝试从内存任务管理器中读取对应任务的元数据：
+            // - params 为 null 时，视为“方法尚未实现”的骨架占位（预留查询所有活跃任务的能力）；
             // - params 不是对象 -> INVALID_PARAMS；
-            // - params 为对象时，检查 task_id 字段的类型，并返回相应的错误（INVALID_PARAMS / METHOD_NOT_FOUND / TASK_NOT_FOUND）。
+            // - params 为对象且 task_id 为非空字符串时：
+            //   - 若能在 TASK_MANAGER 中找到对应任务，返回成功响应；
+            //   - 否则返回 TASK_NOT_FOUND；
+            // - task_id 缺失、类型错误或为空字符串 -> INVALID_PARAMS。
             "Surf.Status" => {
                 if req.params.is_null() {
                     // 缺少参数但方法本身受支持：当前仅作为“尚未实现”的占位
@@ -915,9 +988,35 @@ fn handle_rpc_line(line: &str) -> Option<String> {
                                     let detail = "task_id must be a non-empty string or null".to_string();
                                     JsonRpcError::invalid_params(Some(detail))
                                 } else {
-                                    // 非空字符串：目前没有任务管理器，一律返回 TASK_NOT_FOUND
-                                    let detail = format!("task_id not found: {}", task_id_str);
-                                    JsonRpcError::task_not_found(Some(detail))
+                                    // 非空字符串：尝试从任务管理器查询任务元数据
+                                    match TASK_MANAGER.get_task_info(task_id_str) {
+                                        Some(info) => {
+                                            let result = SurfStatusResult {
+                                                task_id: task_id_str.to_string(),
+                                                state: match info.state {
+                                                    TaskState::Queued => "queued".to_string(),
+                                                    TaskState::Running => "running".to_string(),
+                                                    TaskState::Completed => "completed".to_string(),
+                                                    TaskState::Failed => "failed".to_string(),
+                                                    TaskState::Canceled => "canceled".to_string(),
+                                                },
+                                                // 当前尚未集成 surf-core 进度快照，统一返回 0
+                                                progress: 0.0,
+                                                scanned_files: 0,
+                                                scanned_bytes: 0,
+                                                total_bytes_estimate: None,
+                                                started_at: info.started_at,
+                                                updated_at: info.updated_at,
+                                                tag: info.tag,
+                                            };
+                                            let success_response = JsonRpcSuccessResponse::from_result(result, req.id);
+                                            return Some(serde_json::to_string(&success_response).unwrap_or_else(|_| String::new()));
+                                        }
+                                        None => {
+                                            let detail = format!("task_id not found: {}", task_id_str);
+                                            JsonRpcError::task_not_found(Some(detail))
+                                        }
+                                    }
                                 }
                             } else if v.is_null() {
                                 // task_id 为 null：暂不实现“列出所有活躍任务”的逻辑
