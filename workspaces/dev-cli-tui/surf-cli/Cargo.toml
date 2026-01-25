@@ -21,6 +21,7 @@ num_cpus = "1"
 ratatui = "0.26"
 crossterm = "0.27"
 anyhow = "1"
+trash = "3"
 
 [dev-dependencies]
 assert_cmd = "2.0"

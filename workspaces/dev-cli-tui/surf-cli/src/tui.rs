@@ -39,6 +39,7 @@ use surf_core::{
     ScanConfig,
 };
 use std::time::Duration;
+use trash::delete;
 
 /// TUI 退出原因，用于在 CLI 主程序中区分正常退出与用户中断退出。
 pub enum TuiExit {
@@ -53,6 +54,8 @@ pub enum TuiExit {
 enum TuiMode {
     Scanning,
     Browsing,
+    /// 等待用户确认是否删除当前选中条目（移入回收站）。
+    ConfirmDelete,
     Error,
 }
 
@@ -182,13 +185,14 @@ fn run_tui_loop(
             let title_text = match mode {
                 TuiMode::Scanning => "Surf TUI (scanning)",
                 TuiMode::Browsing => "Surf TUI (browse results)",
+                TuiMode::ConfirmDelete => "Surf TUI (confirm delete)",
                 TuiMode::Error => "Surf TUI (error)",
             };
             let title = ratatui::widgets::Paragraph::new(title_text)
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
             frame.render_widget(title, chunks[0]);
 
-            // 内容区域：根据模式显示扫描进度、浏览列表或错误信息。
+            // 内容区域：根据模式显示扫描进度、浏览列表、删除确认或错误信息。
             match mode {
                 TuiMode::Scanning => {
                     let content_text = if let Some(err) = &error {
@@ -287,6 +291,28 @@ fn run_tui_loop(
                         frame.render_widget(detail_paragraph, detail_area);
                     }
                 }
+                TuiMode::ConfirmDelete => {
+                    use ratatui::widgets::{Block, Borders};
+
+                    let entry_opt = entries.get(selected_index);
+                    let confirm_text = if let Some(entry) = entry_opt {
+                        format!(
+                            "确定要将以下文件移入回收站吗？\n\n大小: {} 字节\n路径:\n{}\n\n按 y/Enter 确认，n/Esc 取消。",
+                            entry.size,
+                            entry.path.display()
+                        )
+                    } else {
+                        "当前没有可删除的条目，按 n 或 Esc 返回浏览。".to_string()
+                    };
+
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .title("确认删除");
+                    let paragraph = ratatui::widgets::Paragraph::new(confirm_text)
+                        .block(block)
+                        .alignment(ratatui::layout::Alignment::Left);
+                    frame.render_widget(paragraph, chunks[1]);
+                }
                 TuiMode::Error => {
                     let content_text = if let Some(err) = &error {
                         format!("Scan error: {}\n\nPress 'q' or Esc to exit.", err)
@@ -311,12 +337,15 @@ fn run_tui_loop(
                     let total = entries.len();
                     let current = if total == 0 { 0 } else { selected_index + 1 };
                     format!(
-                        "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  q/Esc: 退出  (详情: 右侧窗格)",
+                        "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  d: 删除  q/Esc: 退出  (详情: 右侧窗格)",
                         current, total
                     )
                 }
+                TuiMode::ConfirmDelete => {
+                    "Status: Confirm delete | y/Enter: 确认删除  n/Esc: 取消  q: 退出  Ctrl+C: 中断".to_string()
+                }
                 TuiMode::Error => {
-                    format!("Status: Error | q/Esc: 退出")
+                    "Status: Error | q/Esc: 退出".to_string()
                 }
             };
             let status = ratatui::widgets::Paragraph::new(status_text)
@@ -329,48 +358,118 @@ fn run_tui_loop(
             if let Event::Key(key) = event::read()? {
                 // 只处理按键按下事件，避免重复触发
                 if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            // 用户请求退出（正常退出语义）
-                            if !done {
-                                // 扫描尚未完成，尝试取消
-                                if let Some(ref handle) = handle_opt {
-                                    cancel(handle);
+                    match mode {
+                        TuiMode::ConfirmDelete => {
+                            match key.code {
+                                // 确认删除：尝试将当前选中条目移入回收站
+                                KeyCode::Char('y') | KeyCode::Enter => {
+                                    if let Some(entry) = entries.get(selected_index) {
+                                        let path = entry.path.clone();
+                                        match delete(&path) {
+                                            Ok(()) => {
+                                                // 删除成功后，从列表中移除该条目并调整选中索引。
+                                                if !entries.is_empty() {
+                                                    entries.remove(selected_index);
+                                                    if entries.is_empty() {
+                                                        selected_index = 0;
+                                                    } else if selected_index >= entries.len() {
+                                                        selected_index = entries.len() - 1;
+                                                    }
+                                                }
+                                                mode = TuiMode::Browsing;
+                                            }
+                                            Err(e) => {
+                                                error = Some(format!(
+                                                    "Failed to move to trash: {}",
+                                                    e
+                                                ));
+                                                mode = TuiMode::Error;
+                                            }
+                                        }
+                                    } else {
+                                        // 没有选中条目，直接返回浏览模式。
+                                        mode = TuiMode::Browsing;
+                                    }
+                                }
+                                // 取消删除，返回浏览模式
+                                KeyCode::Char('n') | KeyCode::Esc => {
+                                    mode = TuiMode::Browsing;
+                                }
+                                // Ctrl+C：在确认弹窗中同样支持中断整个扫描/程序
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if !done {
+                                        if let Some(ref handle) = handle_opt {
+                                            cancel(handle);
+                                        }
+                                    }
+                                    exit_reason = TuiExit::Interrupted;
+                                    break;
+                                }
+                                // q：直接退出 TUI
+                                KeyCode::Char('q') => {
+                                    if !done {
+                                        if let Some(ref handle) = handle_opt {
+                                            cancel(handle);
+                                        }
+                                    }
+                                    exit_reason = TuiExit::Completed;
+                                    break;
+                                }
+                                _ => {
+                                    // 其他按键在确认弹窗中暂不处理
                                 }
                             }
-                            exit_reason = TuiExit::Completed;
-                            break;
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if mode == TuiMode::Browsing && !entries.is_empty() {
-                                if selected_index == 0 {
-                                    selected_index = entries.len().saturating_sub(1);
-                                } else {
-                                    selected_index = selected_index.saturating_sub(1);
-                                }
-                            }
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if mode == TuiMode::Browsing && !entries.is_empty() {
-                                if selected_index + 1 >= entries.len() {
-                                    selected_index = 0;
-                                } else {
-                                    selected_index += 1;
-                                }
-                            }
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            // Ctrl+C：与 CLI 模式保持一致，视为“用户中断”，退出码应为非零
-                            if !done {
-                                if let Some(ref handle) = handle_opt {
-                                    cancel(handle);
-                                }
-                            }
-                            exit_reason = TuiExit::Interrupted;
-                            break;
                         }
                         _ => {
-                            // 其他按键暂时忽略
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    // 用户请求退出（正常退出语义）
+                                    if !done {
+                                        // 扫描尚未完成，尝试取消
+                                        if let Some(ref handle) = handle_opt {
+                                            cancel(handle);
+                                        }
+                                    }
+                                    exit_reason = TuiExit::Completed;
+                                    break;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if mode == TuiMode::Browsing && !entries.is_empty() {
+                                        if selected_index == 0 {
+                                            selected_index = entries.len().saturating_sub(1);
+                                        } else {
+                                            selected_index = selected_index.saturating_sub(1);
+                                        }
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if mode == TuiMode::Browsing && !entries.is_empty() {
+                                        if selected_index + 1 >= entries.len() {
+                                            selected_index = 0;
+                                        } else {
+                                            selected_index += 1;
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('d') => {
+                                    if mode == TuiMode::Browsing && !entries.is_empty() {
+                                        mode = TuiMode::ConfirmDelete;
+                                    }
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    // Ctrl+C：与 CLI 模式保持一致，视为“用户中断”，退出码应为非零
+                                    if !done {
+                                        if let Some(ref handle) = handle_opt {
+                                            cancel(handle);
+                                        }
+                                    }
+                                    exit_reason = TuiExit::Interrupted;
+                                    break;
+                                }
+                                _ => {
+                                    // 其他按键暂时忽略
+                                }
+                            }
                         }
                     }
                 }
