@@ -1055,6 +1055,15 @@
       - 在仓库根目录依次运行 `bash test/scripts/cli_oneoff_basic.sh` 与 `bash test/scripts/cli_json_mode.sh`，两个脚本在当前环境下均再次 PASS（退出码均为 0），输出包含 `PASS` 与 `EXIT_CODE:0` 标记，确认 `release/linux-x86_64/cli/surf` 现有交付二进制在基础单次模式与 JSON 模式下依然工作正常，stdout/stderr 分流行为与 PRD/Architecture 约定保持一致。
       - 受限于运行环境无法重新构建 CLI/TUI 与服务二进制（缺少 Rust 2021 edition 或 crates.io 访问），本轮未对 `--tui` 入口或 JSON-RPC 服务形态做新增验证；TUI 端到端验收与服务模式脚本仍需在人类可控的、具备完整工具链与依赖缓存的机器上按前述步骤完成。
 
+    - 现实状态注记（本次 Ralph 第 33 轮 / delivery —— TUI 冒烟脚本执行结果）：
+      - 脚本：`test/scripts/tui_basic_navigation.sh`
+      - 二进制：`release/linux-x86_64/cli/surf`
+      - 执行命令：`bash test/scripts/tui_basic_navigation.sh`
+      - 退出码：`1`（FAIL）
+      - 错误摘要：`--tui flag not found in surf --help output`；脚本输出包含 `help sample (first 200 bytes):` 与 `Usage: surf [OPTIONS]` 等片段，未出现 `--tui` 开关。
+      - 结论与现状关系：当前 release 目录中的 CLI 二进制仍未包含 `--tui` 入口，无法进入 TUI 模式，导致该冒烟脚本失败；与 7.3 既有注记关于“release 二进制不含 TUI 开关”的结论一致，属交付工件版本落后而非源码逻辑回归。
+      - 后续建议（需在具备 Rust 2021 工具链与依赖缓存/网络环境的机器上执行）：在开发机或 CI 上运行 `cargo build -p surf-cli --release` 重新构建 `surf`，将生成的 `target/release/surf` 覆盖到 `release/linux-x86_64/cli/surf` 后，重跑本脚本与其他 TUI 用例以完成交付端到端验收。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
