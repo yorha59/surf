@@ -1046,6 +1046,11 @@
       - `release/linux-x86_64/service/surf-service` 运行日志继续显示 `surf-service listening on 127.0.0.1:21523 (max_concurrent_scans=4, task_ttl_seconds=600).` 与 `JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet; this binary ...`，确认当前 release 目录中的服务二进制仍为仅具监听能力的占位实现，未接入 `workspaces/dev-service-api/surf-service/src/main.rs` 中已经落地的 JSON-RPC 逻辑。
       - 在本运行环境下，由于 Rust 工具链版本过旧且缺乏 crates.io 访问/依赖缓存，短期内仍无法在本机通过 `cargo build -p surf-service --release` 重新构建并同步新版二进制；`SVC-JSONRPC-001` 的交付验证依旧需要在具备 Rust 2021 edition 与完整依赖缓存的人工/CI 环境中完成构建与脚本回归。
 
+    - 现实状态注记（本次 Ralph 第 22 轮 / delivery —— CLI TUI 支持检查）：
+      - 在仓库根目录执行 `./release/linux-x86_64/cli/surf --help`，当前帮助输出仅列出 `--path` / `--min-size` / `--limit` / `--json` / `--threads` / `--service` / `--port` / `--host` 等参数，并未包含 `--tui` 开关，说明 `release/linux-x86_64/cli/surf` 仍为不含 TUI 入口的旧版本二进制。
+      - 与 `workspaces/dev-cli-tui/surf-cli/src/main.rs` / `tui.rs` 中已经落地的 TUI 设计（参见 4.4.1~4.4.6 的架构说明及实现注记）相比，当前交付工件尚未重新构建并同步最新 CLI 形态，导致无法在交付阶段基于 release 目录验证 `TUI-BROWSE-001` 相关验收脚本（例如 Architecture.md 7.3 中预留的 `test/scripts/tui_basic_navigation.sh`）。
+      - 后续在具备 Rust 2021 edition 且可访问 crates.io（或拥有完整依赖缓存）的环境中，需由人类开发者执行：`cargo build -p surf-cli --release`，将生成的 `target/release/surf` 覆盖到 `release/linux-x86_64/cli/surf`，并在此基础上新增并运行 `test/scripts/tui_basic_navigation.sh` 等 TUI 冒烟脚本，以完成基于交付工件的 TUI 端到端验收闭环。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
