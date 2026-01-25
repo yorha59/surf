@@ -102,70 +102,129 @@ impl DirNode {
     }
 }
 
-/// 从扁平文件列表构建目录树（当前实现为**根目录一级聚合视图**）。
+/// 从扁平文件列表构建目录树。
 ///
-/// - `root_path`：扫描根目录。
+/// - `root_path`：扫描根目录；
 /// - `entries`：来自 `surf-core` 的文件条目列表（仅文件，不含目录）。
 ///
-/// 返回的 `DirNode`：
-/// - `full_path == root_path`，`children` 包含：
-///   - 直接位于根目录下的文件节点；
-///   - 每个直接子目录对应一个目录节点，其 `size` 为该目录下所有子孙文件大小之和；
-/// - 根节点的 `size` 为所有文件大小之和；
-/// - 同一层级下子节点按 `size` 降序排序。
+/// 返回的 `DirNode` 满足：
+/// - `full_path == root_path`，表示扫描根目录；
+/// - `children` 递归包含根目录下所有层级的目录和文件：
+///   - 每个目录节点的 `size` 为其所有子孙文件大小之和；
+///   - 根节点的 `size` 为整个扫描结果中所有文件大小之和；
+/// - 同一层级下子节点按 `size` 降序排序，便于在 TUI 中按占用大小浏览。
 pub fn build_tree(root_path: &Path, entries: Vec<FileEntry>) -> DirNode {
-    use std::collections::HashMap;
-
-    // 根节点：代表当前扫描根目录。
     let mut root = DirNode::new_directory(root_path.to_path_buf());
 
-    // 统计：
-    // - 根目录下的直接文件列表；
-    // - 直接子目录的聚合大小（包含其所有子孙文件）。
-    let mut direct_files: Vec<DirNode> = Vec::new();
-    let mut direct_dir_sizes: HashMap<PathBuf, u64> = HashMap::new();
-
-    for entry in &entries {
-        let file_path = &entry.path;
-        let file_size = entry.size;
-
-        // 累加到根目录总大小。
-        root.size = root.size.saturating_add(file_size);
-
-        // 若文件直接位于根目录下，则记录为直接文件节点。
-        if file_path.parent() == Some(root_path) {
-            direct_files.push(DirNode::new_file(file_path.clone(), file_size));
-        }
-
-        // 将文件大小累加到其所有祖先目录，用于计算各直接子目录的聚合大小。
-        let mut current = file_path.parent();
-        while let Some(dir) = current {
-            if dir == root_path {
-                break;
-            }
-            *direct_dir_sizes.entry(dir.to_path_buf()).or_insert(0) += file_size;
-            current = dir.parent();
-        }
+    for entry in entries {
+        insert_file_into_tree(&mut root, root_path, &entry.path, entry.size);
     }
 
-    // 先添加直接文件子节点。
-    for file_node in direct_files {
-        root.add_child(file_node);
-    }
-
-    // 为每个直接子目录构建目录节点，并附上聚合大小。
-    for (dir_path, total_size) in direct_dir_sizes {
-        if dir_path.parent() == Some(root_path) {
-            let mut dir_node = DirNode::new_directory(dir_path);
-            dir_node.size = total_size;
-            root.add_child(dir_node);
-        }
-    }
-
-    // 根目录下的所有子节点按 size 降序排序，用于 TUI 浏览 TopN。
-    root.sort_children();
+    sort_tree_by_size(&mut root);
 
     root
+}
+
+/// 将单个文件条目插入到目录树中，并沿途累加各级目录的聚合大小。
+fn insert_file_into_tree(root: &mut DirNode, root_path: &Path, file_path: &Path, size: u64) {
+    // 更新根节点聚合大小。
+    root.size = root.size.saturating_add(size);
+
+    // 若文件路径不在 root_path 之下，退化为“直接挂到根目录”。
+    let mut current_dir = file_path.parent();
+    if current_dir.is_none() {
+        // 没有父目录，作为根节点直接子文件处理。
+        root.children.push(DirNode::new_file(file_path.to_path_buf(), size));
+        return;
+    }
+
+    // 收集 root_path 之下的所有祖先目录路径（不包含 root_path 本身），
+    // 例如：/root/sub1/deep/file.bin -> [/root/sub1, /root/sub1/deep]
+    let mut ancestors: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = current_dir {
+        if dir == root_path {
+            break;
+        }
+        if !dir.starts_with(root_path) {
+            // 文件不在 root_path 之下，直接作为根目录子文件处理。
+            ancestors.clear();
+            break;
+        }
+        ancestors.push(dir.to_path_buf());
+        current_dir = dir.parent();
+    }
+    ancestors.reverse();
+
+    // 从根开始，依次下钻/创建每一级目录节点，并累加 size。
+    let mut node = root;
+    for dir_path in &ancestors {
+        // 尝试在当前节点下找到对应目录；如不存在则创建。
+        if let Some(existing) = node
+            .children
+            .iter_mut()
+            .find(|child| child.is_directory() && child.full_path == *dir_path)
+        {
+            existing.size = existing.size.saturating_add(size);
+            node = existing;
+        } else {
+            let mut new_dir = DirNode::new_directory(dir_path.clone());
+            new_dir.size = size;
+            node.children.push(new_dir);
+            let len = node.children.len();
+            node = &mut node.children[len - 1];
+        }
+    }
+
+    // 在最终目录节点下添加文件节点；目录大小已在上面的循环中累加。
+    node.children.push(DirNode::new_file(file_path.to_path_buf(), size));
+}
+
+/// 递归按 size 对整个目录树的子节点进行降序排序。
+fn sort_tree_by_size(node: &mut DirNode) {
+    node.sort_children();
+    for child in &mut node.children {
+        if child.is_directory() {
+            sort_tree_by_size(child);
+        }
+    }
+}
+
+/// 在目录树中按完整路径查找节点（只读）。
+pub fn find_node<'a>(root: &'a DirNode, target: &Path) -> Option<&'a DirNode> {
+    if root.full_path == target {
+        return Some(root);
+    }
+
+    if !root.is_directory() {
+        return None;
+    }
+
+    for child in &root.children {
+        if let Some(found) = find_node(child, target) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// 在目录树中按完整路径查找节点（可变）。
+pub fn find_node_mut<'a>(root: &'a mut DirNode, target: &Path) -> Option<&'a mut DirNode> {
+    if root.full_path == target {
+        return Some(root);
+    }
+
+    if !root.is_directory() {
+        return None;
+    }
+
+    for child in &mut root.children {
+        if let Some(found) = find_node_mut(child, target) {
+            return Some(found);
+        }
+    }
+
+    None
 }
 
 /// 获取当前选中节点的完整路径显示
@@ -225,5 +284,24 @@ mod tests {
 
         assert!(has_root_file, "root should expose direct file child");
         assert!(has_subdir, "root should expose direct sub-directory child");
+
+        // 验证子目录层级结构：sub1 应该包含 deep 子目录。
+        let sub1 = tree
+            .children
+            .iter()
+            .find(|c| c.is_directory() && c.name == "sub1")
+            .expect("sub1 directory should exist");
+
+        let deep = sub1
+            .children
+            .iter()
+            .find(|c| c.is_directory() && c.name == "deep")
+            .expect("deep directory should exist under sub1");
+
+        // deep 目录只包含一个文件 c.bin，大小为 30。
+        assert_eq!(deep.size, 30);
+        assert_eq!(deep.children.len(), 1);
+        assert!(deep.children[0].is_file());
+        assert_eq!(deep.children[0].name, "c.bin");
     }
 }

@@ -781,7 +781,7 @@
       - 目录节点的大小为所有子文件大小之和；
       - 列表排序按大小降序，与 CLI/服务层的 TopN 语义对齐。
 
-> 现实状态注记（TUI 与 core/service 集成）：截至当前迭代，TUI 已在 `surf-cli` 中以最小形态落地：`tui::run_tui` 直接基于 `ScanConfig` / `start_scan` / `poll_status` / `cancel` 在本地进程内驱动扫描，并在全屏界面中展示实时 `scanned_files` / `scanned_bytes` 与错误摘要，但尚未使用 `collect_results` 构建目录树或 TopN 视图，浏览与删除能力仍待后续迭代实现。MVP 仍聚焦于 `LocalCore` 后端；未来如需通过 JSON-RPC 访问远程扫描结果，再依据 4.3 中的服务接口扩展 `TuiScanBackend`。
+> 现实状态注记（TUI 与 core/service 集成）：截至当前迭代，TUI 已在 `surf-cli` 中接入 `ScanConfig` / `start_scan` / `poll_status` / `collect_results` / `cancel`：`tui::run_tui` 在本地进程内驱动扫描，扫描完成后基于 `collect_results` 返回的 `Vec<FileEntry>` 在内存中构建多级目录树（`tui_model::build_tree`），并在全屏界面中展示实时 `scanned_files` / `scanned_bytes`、目录树浏览视图（支持在根目录与子目录间通过 Enter / Backspace / h / l 等按键下钻与返回）以及基于 `trash` crate 的单文件“移入回收站”删除能力。当前仍未在 TUI 中接入 JSON-RPC 远程扫描结果，也尚未支持目录级删除以及对父级目录聚合大小在删除后的精确更新；MVP 继续聚焦 `LocalCore` 后端，未来如需通过 `surf-service` 访问远程扫描结果，再依据 4.3 中的服务接口扩展 `TuiScanBackend`。
 
 #### 4.4.5 删除操作与安全策略（与 6.2 对齐）
 
