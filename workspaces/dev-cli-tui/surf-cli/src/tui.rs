@@ -21,7 +21,14 @@
 //! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
 
 mod tui_model;
-use tui_model::{build_tree, DirNode, NodeType};
+use tui_model::{
+    build_tree,
+    DirNode,
+    NodeType,
+    get_node_display_path,
+    get_node_display_size,
+    get_node_display_type,
+};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -38,7 +45,6 @@ use surf_core::{
     collect_results,
     poll_status,
     start_scan,
-    FileEntry,
     ScanConfig,
 };
 use std::time::Duration;
@@ -119,10 +125,9 @@ fn run_tui_loop(
     let mut done = false;
     let mut error = None::<String>;
 
-    // 当前模式与浏览列表状态。
+    // 当前模式与浏览列表状态：root_node 代表扫描根目录的聚合视图。
     let mut root_node: Option<DirNode> = None;
     let mut mode = TuiMode::Scanning;
-    let mut entries: Vec<FileEntry> = Vec::new();
     let mut selected_index: usize = 0;
 
     // 为了在扫描完成后还能正常退出，这里将句柄包在 Option 中：
@@ -146,8 +151,10 @@ fn run_tui_loop(
             if done && error.is_none() && mode == TuiMode::Scanning {
                 match collect_results(handle_opt.take().unwrap()) {
                     Ok(collected) => {
-                        entries = collected;
-                        root_node = Some(build_tree(&root_path, collected.clone()));
+                        // 基于 surf-core 的扁平结果构建根目录一级聚合视图：
+                        // - 直接位于根目录下的文件作为 File 节点；
+                        // - 每个直接子目录作为 Directory 节点，size 为其子孙文件总和。
+                        root_node = Some(build_tree(&root_path, collected));
                         selected_index = 0;
                         mode = TuiMode::Browsing;
                     }
@@ -220,19 +227,31 @@ fn run_tui_loop(
 
                     // 根据宽度决定是否拆分左右区域
                     let content_area = chunks[1];
+
+                    // 当前视图中用于展示的节点列表：来自根目录聚合视图的直接子节点。
+                    let children: Vec<DirNode> = match &root_node {
+                        Some(root) => root.children().to_vec(),
+                        None => Vec::new(),
+                    };
+
                     if content_area.width < 40 {
                         // 宽度过窄，退化为单列列表
-                        let items: Vec<ListItem> = entries
+                        let items: Vec<ListItem> = children
                             .iter()
-                            .take(usize::min(entries.len(), 100))
+                            .take(usize::min(children.len(), 100))
                             .enumerate()
-                            .map(|(idx, entry)| {
+                            .map(|(idx, node)| {
                                 let prefix = if idx == selected_index { "▶" } else { " " };
+                                let type_label = match node.node_type {
+                                    NodeType::File => "F",
+                                    NodeType::Directory => "D",
+                                };
                                 let line = format!(
-                                    "{} {:>12}  {}",
+                                    "{} [{}] {:>12}  {}",
                                     prefix,
-                                    entry.size,
-                                    entry.path.display()
+                                    type_label,
+                                    node.size,
+                                    node.name
                                 );
                                 ListItem::new(line)
                             })
@@ -255,17 +274,22 @@ fn run_tui_loop(
                         let detail_area = chunks_h[1];
 
                         // 左侧列表（与之前相同）
-                        let items: Vec<ListItem> = entries
+                        let items: Vec<ListItem> = children
                             .iter()
-                            .take(usize::min(entries.len(), 100))
+                            .take(usize::min(children.len(), 100))
                             .enumerate()
-                            .map(|(idx, entry)| {
+                            .map(|(idx, node)| {
                                 let prefix = if idx == selected_index { "▶" } else { " " };
+                                let type_label = match node.node_type {
+                                    NodeType::File => "F",
+                                    NodeType::Directory => "D",
+                                };
                                 let line = format!(
-                                    "{} {:>12}  {}",
+                                    "{} [{}] {:>12}  {}",
                                     prefix,
-                                    entry.size,
-                                    entry.path.display()
+                                    type_label,
+                                    node.size,
+                                    node.name
                                 );
                                 ListItem::new(line)
                             })
@@ -282,15 +306,19 @@ fn run_tui_loop(
                         let detail_block = Block::default()
                             .borders(Borders::ALL)
                             .title("当前条目详情");
-                        let detail_text = if entries.is_empty() {
+                        let detail_text = if children.is_empty() {
                             "暂无扫描结果".to_string()
                         } else {
-                            let entry = &entries[selected_index];
-                            let total = entries.len();
+                            let node = &children[selected_index];
+                            let total = children.len();
                             let current = selected_index + 1;
                             format!(
-                                "位置: {} / {}\n大小: {} 字节\n路径:\n{}",
-                                current, total, entry.size, entry.path.display()
+                                "位置: {} / {}\n类型: {}\n大小: {}\n路径:\n{}",
+                                current,
+                                total,
+                                get_node_display_type(node),
+                                get_node_display_size(node),
+                                get_node_display_path(node),
                             )
                         };
                         let detail_paragraph = ratatui::widgets::Paragraph::new(detail_text)
@@ -301,13 +329,28 @@ fn run_tui_loop(
                 TuiMode::ConfirmDelete => {
                     use ratatui::widgets::{Block, Borders};
 
-                    let entry_opt = entries.get(selected_index);
-                    let confirm_text = if let Some(entry) = entry_opt {
-                        format!(
-                            "确定要将以下文件移入回收站吗？\n\n大小: {} 字节\n路径:\n{}\n\n按 y/Enter 确认，n/Esc 取消。",
-                            entry.size,
-                            entry.path.display()
-                        )
+                    let confirm_text = if let Some(root) = &root_node {
+                        let children = root.children();
+                        if selected_index < children.len() {
+                            let node = &children[selected_index];
+                            if node.is_directory() {
+                                format!(
+                                    "当前选中的是目录，暂不支持在 TUI 中删除整个目录。\n\n类型: {}\n大小: {}\n路径:\n{}\n\n按 n 或 Esc 返回浏览。",
+                                    get_node_display_type(node),
+                                    get_node_display_size(node),
+                                    get_node_display_path(node),
+                                )
+                            } else {
+                                format!(
+                                    "确定要将以下文件移入回收站吗？\n\n类型: {}\n大小: {}\n路径:\n{}\n\n按 y/Enter 确认，n/Esc 取消。",
+                                    get_node_display_type(node),
+                                    get_node_display_size(node),
+                                    get_node_display_path(node),
+                                )
+                            }
+                        } else {
+                            "当前没有可删除的条目，按 n 或 Esc 返回浏览。".to_string()
+                        }
                     } else {
                         "当前没有可删除的条目，按 n 或 Esc 返回浏览。".to_string()
                     };
@@ -341,7 +384,10 @@ fn run_tui_loop(
                     )
                 }
                 TuiMode::Browsing => {
-                    let total = entries.len();
+                    let total = match &root_node {
+                        Some(root) => root.children().len(),
+                        None => 0,
+                    };
                     let current = if total == 0 { 0 } else { selected_index + 1 };
                     format!(
                         "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  d: 删除  q/Esc: 退出  (详情: 右侧窗格)",
@@ -370,31 +416,47 @@ fn run_tui_loop(
                             match key.code {
                                 // 确认删除：尝试将当前选中条目移入回收站
                                 KeyCode::Char('y') | KeyCode::Enter => {
-                                    if let Some(entry) = entries.get(selected_index) {
-                                        let path = entry.path.clone();
-                                        match delete(&path) {
-                                            Ok(()) => {
-                                                // 删除成功后，从列表中移除该条目并调整选中索引。
-                                                if !entries.is_empty() {
-                                                    entries.remove(selected_index);
-                                                    if entries.is_empty() {
-                                                        selected_index = 0;
-                                                    } else if selected_index >= entries.len() {
-                                                        selected_index = entries.len() - 1;
+                                    if let Some(root) = root_node.as_mut() {
+                                        let total = root.children().len();
+                                        if selected_index < total {
+                                            // 先获取目标节点的路径与类型，再尝试删除并刷新目录树。
+                                            let (path, is_dir) = {
+                                                let node = &root.children()[selected_index];
+                                                (node.full_path.clone(), node.is_directory())
+                                            };
+
+                                            if is_dir {
+                                                // 当前不支持目录删除，给出明确提示。
+                                                error = Some("TUI 当前仅支持删除单个文件，目录删除尚未实现。".to_string());
+                                                mode = TuiMode::Error;
+                                            } else {
+                                                match delete(&path) {
+                                                    Ok(()) => {
+                                                        // 删除成功后，从根节点子列表中移除该条目并调整选中索引。
+                                                        root.remove_child_at(selected_index);
+                                                        let remaining = root.children().len();
+                                                        if remaining == 0 {
+                                                            selected_index = 0;
+                                                        } else if selected_index >= remaining {
+                                                            selected_index = remaining - 1;
+                                                        }
+                                                        mode = TuiMode::Browsing;
+                                                    }
+                                                    Err(e) => {
+                                                        error = Some(format!(
+                                                            "Failed to move to trash: {}",
+                                                            e
+                                                        ));
+                                                        mode = TuiMode::Error;
                                                     }
                                                 }
-                                                mode = TuiMode::Browsing;
                                             }
-                                            Err(e) => {
-                                                error = Some(format!(
-                                                    "Failed to move to trash: {}",
-                                                    e
-                                                ));
-                                                mode = TuiMode::Error;
-                                            }
+                                        } else {
+                                            // 索引越界时，直接返回浏览模式以避免 panic。
+                                            mode = TuiMode::Browsing;
                                         }
                                     } else {
-                                        // 没有选中条目，直接返回浏览模式。
+                                        // 没有可用的聚合视图，直接返回浏览模式。
                                         mode = TuiMode::Browsing;
                                     }
                                 }
@@ -441,26 +503,47 @@ fn run_tui_loop(
                                     break;
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
-                                    if mode == TuiMode::Browsing && !entries.is_empty() {
-                                        if selected_index == 0 {
-                                            selected_index = entries.len().saturating_sub(1);
-                                        } else {
-                                            selected_index = selected_index.saturating_sub(1);
+                                    if mode == TuiMode::Browsing {
+                                        if let Some(root) = &root_node {
+                                            let total = root.children().len();
+                                            if total > 0 {
+                                                if selected_index == 0 {
+                                                    selected_index = total.saturating_sub(1);
+                                                } else {
+                                                    selected_index = selected_index.saturating_sub(1);
+                                                }
+                                            }
                                         }
                                     }
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
-                                    if mode == TuiMode::Browsing && !entries.is_empty() {
-                                        if selected_index + 1 >= entries.len() {
-                                            selected_index = 0;
-                                        } else {
-                                            selected_index += 1;
+                                    if mode == TuiMode::Browsing {
+                                        if let Some(root) = &root_node {
+                                            let total = root.children().len();
+                                            if total > 0 {
+                                                if selected_index + 1 >= total {
+                                                    selected_index = 0;
+                                                } else {
+                                                    selected_index += 1;
+                                                }
+                                            }
                                         }
                                     }
                                 }
                                 KeyCode::Char('d') => {
-                                    if mode == TuiMode::Browsing && !entries.is_empty() {
-                                        mode = TuiMode::ConfirmDelete;
+                                    if mode == TuiMode::Browsing {
+                                        if let Some(root) = &root_node {
+                                            let children = root.children();
+                                            if !children.is_empty() && selected_index < children.len() {
+                                                if children[selected_index].is_file() {
+                                                    mode = TuiMode::ConfirmDelete;
+                                                } else {
+                                                    // 选中的是目录，当前不支持删除，提示后进入错误模式。
+                                                    error = Some("当前仅支持删除单个文件，目录删除尚未实现。".to_string());
+                                                    mode = TuiMode::Error;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

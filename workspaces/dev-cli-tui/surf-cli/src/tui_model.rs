@@ -68,6 +68,19 @@ impl DirNode {
         self.children.push(child);
     }
 
+    /// 按索引移除一个子节点，并从当前目录大小中扣除该子节点的聚合大小。
+    ///
+    /// - 若索引越界，返回 `None`，不修改任何状态；
+    /// - 若索引合法，返回被移除的子节点，并使用 `saturating_sub` 防御性更新目录大小。
+    pub fn remove_child_at(&mut self, index: usize) -> Option<DirNode> {
+        if index >= self.children.len() {
+            return None;
+        }
+        let child = self.children.remove(index);
+        self.size = self.size.saturating_sub(child.size);
+        Some(child)
+    }
+
     /// 对子节点按 size 降序排序
     pub fn sort_children(&mut self) {
         self.children.sort_by(|a, b| b.size.cmp(&a.size));
