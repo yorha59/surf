@@ -809,6 +809,14 @@
     - 现实状态注记（iteration 77 / delivery）：本轮基于 `release/linux-x86_64/cli/surf` 运行了 `test/scripts/cli_oneoff_basic.sh` 与 `test/scripts/cli_json_mode.sh` 两个 CLI 冒烟脚本。两脚本均 PASS（退出码均为 0）：前者完成 `--help` 最小检查，后者验证 `--json` 输出结构包含 `root` 与 `entries` 字段，CLI 二进制存在且可用。后续建议继续在具备网络的开发机或 CI 上完善服务层二进制的构建并复查服务相关脚本，以保证交付端到端覆盖。
     - 现实状态注记（本次 Ralph 第 1 轮 / delivery）：本轮在仓库根目录运行 `bash test/scripts/service_jsonrpc_invalid_params.sh`，脚本在发送带非法 `min_size`（如 `10XYZ`）的 `Surf.Scan` 请求后同样只看到服务进程输出占位提示 `"surf-service listening on 127.0.0.1:21523 ... JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet; this binary ..."`，客户端侧收到空响应并以 `EXIT_CODE:1` 标记 FAIL。该结果进一步佐证当前 `release/linux-x86_64/service/surf-service` 仍为不带 JSON-RPC 真实实现的占位二进制，无法用于验证服务模式下的参数校验与错误码行为；在具备正常 Rust 依赖环境的开发机或 CI 上重新构建并替换该二进制之前，`test/scripts/service_jsonrpc_basic.sh` 与 `test/scripts/service_jsonrpc_invalid_params.sh` 的失败应视为交付工件版本落后的已知问题，而非服务层源码逻辑本身的回归。
 
+    - 现实状态注记（本次 Ralph 第 2 轮 / delivery）：
+      - 脚本：`test/scripts/service_jsonrpc_basic.sh`
+      - 二进制：`release/linux-x86_64/service/surf-service`
+      - 退出码：`1`（FAIL）
+      - 输出要点：服务进程 stdout 显示 `surf-service listening on 127.0.0.1:21523 ... JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet ...`，客户端侧收到空响应。
+      - 失败原因：占位二进制缺少 `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 的真实实现。
+      - 交付结论：当前 release 下的 `surf-service` 仍无法用于验证 JSON-RPC happy path；需在具备正常 Rust 依赖环境的机器上重新构建并同步 release 二进制后再重跑该脚本。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
