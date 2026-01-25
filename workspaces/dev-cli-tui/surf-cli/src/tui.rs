@@ -30,6 +30,7 @@ use tui_model::{
     get_node_display_path,
     get_node_display_size,
     get_node_display_type,
+    recompute_aggregated_sizes,
 };
 use anyhow::{Context, Result};
 use crossterm::{
@@ -487,12 +488,12 @@ fn run_tui_loop(
                                             }
                                         }
 
-                                        // 目前仅在当前目录节点上更新 size，未同步调整其祖先目录的聚合大小；
-                                        // 这意味着在多级目录场景中，父目录显示的 size 可能在删除后略有偏差，
-                                        // 但不会影响当前目录浏览列表的正确性。
                                         if deleted {
-                                            // 占位钩子：未来如需精确维护祖先目录 size，可在此处调用
-                                            // 专门的 "adjust_ancestors_after_delete" 辅助函数。
+                                            // 删除成功后，通过一次性重算整棵目录树的聚合大小，
+                                            // 确保根节点及所有祖先目录的 size 与当前剩余文件一致。
+                                            if let Some(root) = root_node.as_mut() {
+                                                recompute_aggregated_sizes(root);
+                                            }
                                         }
                                     } else {
                                         // 没有可用的聚合视图，直接返回浏览模式。

@@ -189,6 +189,27 @@ fn sort_tree_by_size(node: &mut DirNode) {
     }
 }
 
+/// 递归重新计算整棵目录树的聚合大小。
+///
+/// - 对于文件节点：保留其原有 `size`，并将该值作为返回值；
+/// - 对于目录节点：先递归处理所有子节点，将子节点 size 之和写回当前目录的
+///   `size` 字段，并返回该聚合值。
+///
+/// 该函数用于在 TUI 中执行删除操作后，对整棵目录树的聚合大小进行一次性校正，
+/// 确保根节点以及所有祖先目录显示的大小与当前剩余文件列表一致。
+pub fn recompute_aggregated_sizes(node: &mut DirNode) -> u64 {
+    if node.is_directory() {
+        let mut total = 0u64;
+        for child in &mut node.children {
+            total = total.saturating_add(recompute_aggregated_sizes(child));
+        }
+        node.size = total;
+        total
+    } else {
+        node.size
+    }
+}
+
 /// 在目录树中按完整路径查找节点（只读）。
 pub fn find_node<'a>(root: &'a DirNode, target: &Path) -> Option<&'a DirNode> {
     if root.full_path == target {
@@ -303,5 +324,54 @@ mod tests {
         assert_eq!(deep.children.len(), 1);
         assert!(deep.children[0].is_file());
         assert_eq!(deep.children[0].name, "c.bin");
+    }
+
+    #[test]
+    fn recompute_sizes_after_removing_child_updates_ancestors() {
+        let root = PathBuf::from("/root");
+
+        let entries = vec![
+            FileEntry { path: root.join("a.bin"), size: 10 },
+            FileEntry { path: root.join("sub1").join("b.bin"), size: 20 },
+        ];
+
+        let mut tree = build_tree(&root, entries);
+
+        // 初始聚合大小：根为 30，sub1 为 20。
+        assert_eq!(tree.size, 30);
+        let sub1 = tree
+            .children
+            .iter()
+            .find(|c| c.is_directory() && c.name == "sub1")
+            .expect("sub1 directory should exist");
+        assert_eq!(sub1.size, 20);
+
+        // 模拟在 TUI 中删除 /root/sub1/b.bin：从 sub1 子节点列表中移除该文件。
+        {
+            let sub1_mut = tree
+                .children
+                .iter_mut()
+                .find(|c| c.is_directory() && c.name == "sub1")
+                .expect("sub1 directory should exist (mutable)");
+            let idx = sub1_mut
+                .children
+                .iter()
+                .position(|c| c.is_file() && c.name == "b.bin")
+                .expect("b.bin should exist under sub1");
+            sub1_mut.remove_child_at(idx);
+        }
+
+        // 调用聚合大小重算函数，确保根和子目录的 size 与当前剩余文件一致。
+        let total_after = recompute_aggregated_sizes(&mut tree);
+        assert_eq!(total_after, tree.size);
+        assert_eq!(tree.size, 10);
+
+        let sub1_after = tree
+            .children
+            .iter()
+            .find(|c| c.is_directory() && c.name == "sub1")
+            .expect("sub1 directory should still exist after delete");
+        // sub1 下已无文件，聚合大小应为 0。
+        assert_eq!(sub1_after.size, 0);
     }
 }
