@@ -30,6 +30,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{stdout, Stdout};
+use std::path::PathBuf;
 
 use crate::Args;
 use surf_core::{
@@ -78,6 +79,7 @@ pub fn run_tui(args: &Args) -> Result<TuiExit> {
         .context("start scan in TUI mode")?;
 
     let root_display = args.path.display().to_string();
+    let root_path: PathBuf = args.path.clone();
 
     // 设置终端：进入备用屏幕、原始模式，启用鼠标捕获
     enable_raw_mode().context("enable raw mode")?;
@@ -90,7 +92,7 @@ pub fn run_tui(args: &Args) -> Result<TuiExit> {
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     // 主循环
-    let result = run_tui_loop(&mut terminal, handle, root_display);
+    let result = run_tui_loop(&mut terminal, handle, root_display, root_path);
 
     // 恢复终端：离开备用屏幕、禁用原始模式，禁用鼠标捕获
     disable_raw_mode().context("disable raw mode")?;
@@ -110,6 +112,7 @@ fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     handle: surf_core::ScanHandle,
     root_display: String,
+    root_path: PathBuf,
 ) -> Result<TuiExit> {
     let mut scanned_files = 0u64;
     let mut scanned_bytes = 0u64;
@@ -144,7 +147,7 @@ fn run_tui_loop(
                 match collect_results(handle_opt.take().unwrap()) {
                     Ok(collected) => {
                         entries = collected;
-                        root_node = Some(build_tree(&args.path, collected.clone()));
+                        root_node = Some(build_tree(&root_path, collected.clone()));
                         selected_index = 0;
                         mode = TuiMode::Browsing;
                     }
