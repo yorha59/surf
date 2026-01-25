@@ -349,21 +349,12 @@ fn run_tui_loop(
                             let children = current_dir.children();
                             if selected_index < children.len() {
                                 let node = &children[selected_index];
-                                if node.is_directory() {
-                                    format!(
-                                        "当前选中的是目录，暂不支持在 TUI 中删除整个目录。\n\n类型: {}\n大小: {}\n路径:\n{}\n\n按 n 或 Esc 返回浏览。",
-                                        get_node_display_type(node),
-                                        get_node_display_size(node),
-                                        get_node_display_path(node),
-                                    )
-                                } else {
-                                    format!(
-                                        "确定要将以下文件移入回收站吗？\n\n类型: {}\n大小: {}\n路径:\n{}\n\n按 y/Enter 确认，n/Esc 取消。",
-                                        get_node_display_type(node),
-                                        get_node_display_size(node),
-                                        get_node_display_path(node),
-                                    )
-                                }
+                                format!(
+                                    "确定要将以下文件或目录移入回收站吗？\n\n类型: {}\n大小: {}\n路径:\n{}\n\n按 y/Enter 确认，n/Esc 取消。",
+                                    get_node_display_type(node),
+                                    get_node_display_size(node),
+                                    get_node_display_path(node),
+                                )
                             } else {
                                 "当前没有可删除的条目，按 n 或 Esc 返回浏览。".to_string()
                             }
@@ -435,7 +426,7 @@ fn run_tui_loop(
                     match mode {
                         TuiMode::ConfirmDelete => {
                             match key.code {
-                                // 确认删除：尝试将当前选中条目移入回收站
+                                // 确认删除：尝试将当前选中文件或目录移入回收站
                                 KeyCode::Char('y') | KeyCode::Enter => {
                                     if let Some(root) = root_node.as_mut() {
                                         // 将对当前目录节点的可变引用限制在一个内部作用域中，
@@ -445,37 +436,31 @@ fn run_tui_loop(
                                             if let Some(current_dir_node) = find_node_mut(root, &current_dir_path) {
                                                 let total = current_dir_node.children().len();
                                                 if selected_index < total {
-                                                    // 先获取目标节点的路径与类型，再尝试删除并刷新目录树。
-                                                    let (path, is_dir) = {
+                                                    // 先获取目标节点的路径，再尝试删除并刷新目录树。
+                                                    let path = {
                                                         let node = &current_dir_node.children()[selected_index];
-                                                        (node.full_path.clone(), node.is_directory())
+                                                        node.full_path.clone()
                                                     };
 
-                                                    if is_dir {
-                                                        // 当前不支持目录删除，给出明确提示。
-                                                        error = Some("TUI 当前仅支持删除单个文件，目录删除尚未实现。".to_string());
-                                                        mode = TuiMode::Error;
-                                                    } else {
-                                                        match delete(&path) {
-                                                            Ok(()) => {
-                                                                // 删除成功后，从当前目录的子列表中移除该条目并调整选中索引。
-                                                                current_dir_node.remove_child_at(selected_index);
-                                                                let remaining = current_dir_node.children().len();
-                                                                if remaining == 0 {
-                                                                    selected_index = 0;
-                                                                } else if selected_index >= remaining {
-                                                                    selected_index = remaining.saturating_sub(1);
-                                                                }
-                                                                mode = TuiMode::Browsing;
-                                                                deleted = true;
+                                                    match delete(&path) {
+                                                        Ok(()) => {
+                                                            // 删除成功后，从当前目录的子列表中移除该条目并调整选中索引。
+                                                            current_dir_node.remove_child_at(selected_index);
+                                                            let remaining = current_dir_node.children().len();
+                                                            if remaining == 0 {
+                                                                selected_index = 0;
+                                                            } else if selected_index >= remaining {
+                                                                selected_index = remaining.saturating_sub(1);
                                                             }
-                                                            Err(e) => {
-                                                                error = Some(format!(
-                                                                    "Failed to move to trash: {}",
-                                                                    e
-                                                                ));
-                                                                mode = TuiMode::Error;
-                                                            }
+                                                            mode = TuiMode::Browsing;
+                                                            deleted = true;
+                                                        }
+                                                        Err(e) => {
+                                                            error = Some(format!(
+                                                                "Failed to move to trash: {}",
+                                                                e
+                                                            ));
+                                                            mode = TuiMode::Error;
                                                         }
                                                     }
                                                 } else {
@@ -580,13 +565,9 @@ fn run_tui_loop(
                                             if let Some(current_dir) = find_node(root, &current_dir_path) {
                                                 let children = current_dir.children();
                                                 if !children.is_empty() && selected_index < children.len() {
-                                                    if children[selected_index].is_file() {
-                                                        mode = TuiMode::ConfirmDelete;
-                                                    } else {
-                                                        // 选中的是目录，当前不支持删除，提示后进入错误模式。
-                                                        error = Some("当前仅支持删除单个文件，目录删除尚未实现。".to_string());
-                                                        mode = TuiMode::Error;
-                                                    }
+                                                    // 无论当前选中的是文件还是目录，都进入确认删除流程，
+                                                    // 由确认弹窗展示详细信息并提示“文件或目录”语义。
+                                                    mode = TuiMode::ConfirmDelete;
                                                 }
                                             }
                                         }
