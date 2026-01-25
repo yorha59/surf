@@ -13,7 +13,14 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{stdout, Stdout};
 
 use crate::Args;
-use surf_core::{ScanConfig, start_scan, poll_status, cancel};
+use surf_core::{
+    cancel,
+    collect_results,
+    poll_status,
+    start_scan,
+    FileEntry,
+    ScanConfig,
+};
 use std::time::Duration;
 
 /// TUI 退出原因，用于在 CLI 主程序中区分正常退出与用户中断退出。
@@ -22,6 +29,14 @@ pub enum TuiExit {
     Completed,
     /// 用户在 TUI 中触发 Ctrl+C（Control+C）中断退出。
     Interrupted,
+}
+
+/// TUI 内部模式，用于区分扫描中、浏览结果和错误状态。
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum TuiMode {
+    Scanning,
+    Browsing,
+    Error,
 }
 
 pub fn run_tui(args: &Args) -> Result<TuiExit> {
@@ -79,16 +94,51 @@ fn run_tui_loop(
     let mut done = false;
     let mut error = None::<String>;
 
+    // 当前模式与浏览列表状态。
+    let mut mode = TuiMode::Scanning;
+    let mut entries: Vec<FileEntry> = Vec::new();
+    let mut selected_index: usize = 0;
+
+    // 为了在扫描完成后还能正常退出，这里将句柄包在 Option 中：
+    // - 扫描阶段需要通过 &handle 轮询进度和支持取消；
+    // - 一旦进入 Browsing 或 Error 模式并调用 collect_results 之后，就不再需要句柄。
+    let mut handle_opt = Some(handle);
+
     // 默认认为是“正常退出”，仅在收到 Ctrl+C 按键时标记为 Interrupted。
     let mut exit_reason = TuiExit::Completed;
 
     loop {
-        // 轮询扫描状态
-        let status = poll_status(&handle);
-        scanned_files = status.progress.scanned_files;
-        scanned_bytes = status.progress.scanned_bytes;
-        done = status.done;
-        error = status.error.clone();
+        // 轮询扫描状态（仅在仍处于扫描阶段且句柄存在时）。
+        if let Some(ref handle) = handle_opt {
+            let status = poll_status(handle);
+            scanned_files = status.progress.scanned_files;
+            scanned_bytes = status.progress.scanned_bytes;
+            done = status.done;
+            error = status.error.clone();
+
+            // 当扫描自然完成且没有错误时，收集结果并进入 Browsing 模式。
+            if done && error.is_none() && mode == TuiMode::Scanning {
+                match collect_results(handle_opt.take().unwrap()) {
+                    Ok(collected) => {
+                        entries = collected;
+                        selected_index = 0;
+                        mode = TuiMode::Browsing;
+                    }
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        mode = TuiMode::Error;
+                    }
+                }
+            }
+            // 若扫描结束但有错误，则切换到 Error 模式。
+            if done && error.is_some() {
+                mode = TuiMode::Error;
+                // 句柄在错误情况下仍然可以被 collect_results 消耗，但当前实现中
+                // 错误信息已经通过 error 暴露给用户，结果并不会再被使用，这里
+                // 不再额外调用 collect_results。
+                handle_opt = None;
+            }
+        }
 
         // 绘制当前帧
         terminal.draw(|frame| {
@@ -101,7 +151,7 @@ fn run_tui_loop(
                 return;
             }
 
-            // 使用简单的布局：顶部标题、中间提示、底部状态栏
+            // 使用简单的布局：顶部标题、中间内容区域、底部状态栏
             let chunks = ratatui::layout::Layout::default()
                 .direction(ratatui::layout::Direction::Vertical)
                 .constraints([
@@ -111,28 +161,89 @@ fn run_tui_loop(
                 ])
                 .split(area);
 
-            // 标题
-            let title = ratatui::widgets::Paragraph::new("Surf TUI (scanning)")
+            // 标题：根据不同模式显示不同文案。
+            let title_text = match mode {
+                TuiMode::Scanning => "Surf TUI (scanning)",
+                TuiMode::Browsing => "Surf TUI (browse results)",
+                TuiMode::Error => "Surf TUI (error)",
+            };
+            let title = ratatui::widgets::Paragraph::new(title_text)
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
             frame.render_widget(title, chunks[0]);
 
-            // 内容区域：显示扫描进度或错误
-            let content_text = if let Some(err) = &error {
-                format!("Scan error: {}\n\nPress 'q' or Esc to exit.", err)
-            } else if done {
-                format!("Scan completed: {} files, {} bytes.\n\nPress 'q' or Esc to exit.", scanned_files, scanned_bytes)
-            } else {
-                format!("Scanning {} ...\n\nFiles: {}\nBytes: {}\n\nFuture features:\n• Browse and navigate\n• Safe delete", root_display, scanned_files, scanned_bytes)
-            };
-            let content = ratatui::widgets::Paragraph::new(content_text)
-                .alignment(ratatui::layout::Alignment::Center);
-            frame.render_widget(content, chunks[1]);
+            // 内容区域：根据模式显示扫描进度、浏览列表或错误信息。
+            match mode {
+                TuiMode::Scanning => {
+                    let content_text = if let Some(err) = &error {
+                        format!("Scan error: {}\n\nPress 'q' or Esc to exit.", err)
+                    } else {
+                        format!(
+                            "Scanning {} ...\n\nFiles: {}\nBytes: {}\n\nFuture features:\n• Browse and navigate\n• Safe delete",
+                            root_display, scanned_files, scanned_bytes
+                        )
+                    };
+                    let content = ratatui::widgets::Paragraph::new(content_text)
+                        .alignment(ratatui::layout::Alignment::Center);
+                    frame.render_widget(content, chunks[1]);
+                }
+                TuiMode::Browsing => {
+                    use ratatui::widgets::{Block, Borders, List, ListItem};
+
+                    let items: Vec<ListItem> = entries
+                        .iter()
+                        .take(usize::min(entries.len(), 100))
+                        .enumerate()
+                        .map(|(idx, entry)| {
+                            let prefix = if idx == selected_index { "▶" } else { " " };
+                            let line = format!(
+                                "{} {:>12}  {}",
+                                prefix,
+                                entry.size,
+                                entry.path.display()
+                            );
+                            ListItem::new(line)
+                        })
+                        .collect();
+
+                    let list = List::new(items)
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title("Scan results (Top by size)"),
+                        );
+                    frame.render_widget(list, chunks[1]);
+                }
+                TuiMode::Error => {
+                    let content_text = if let Some(err) = &error {
+                        format!("Scan error: {}\n\nPress 'q' or Esc to exit.", err)
+                    } else {
+                        "Unknown error. Press 'q' or Esc to exit.".to_string()
+                    };
+                    let content = ratatui::widgets::Paragraph::new(content_text)
+                        .alignment(ratatui::layout::Alignment::Center);
+                    frame.render_widget(content, chunks[1]);
+                }
+            }
 
             // 状态栏
-            let status_text = if done {
-                format!("Status: Scan completed. files={}, bytes={} | q/Esc: 退出", scanned_files, scanned_bytes)
-            } else {
-                format!("Status: Scanning ... files={}, bytes={} | q/Esc: 退出", scanned_files, scanned_bytes)
+            let status_text = match mode {
+                TuiMode::Scanning => {
+                    format!(
+                        "Status: Scanning ... files={}, bytes={} | q/Esc: 退出  Ctrl+C: 中断",
+                        scanned_files, scanned_bytes
+                    )
+                }
+                TuiMode::Browsing => {
+                    let total = entries.len();
+                    let current = if total == 0 { 0 } else { selected_index + 1 };
+                    format!(
+                        "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  q/Esc: 退出",
+                        current, total
+                    )
+                }
+                TuiMode::Error => {
+                    format!("Status: Error | q/Esc: 退出")
+                }
             };
             let status = ratatui::widgets::Paragraph::new(status_text)
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray));
@@ -149,15 +260,37 @@ fn run_tui_loop(
                             // 用户请求退出（正常退出语义）
                             if !done {
                                 // 扫描尚未完成，尝试取消
-                                cancel(&handle);
+                                if let Some(ref handle) = handle_opt {
+                                    cancel(handle);
+                                }
                             }
                             exit_reason = TuiExit::Completed;
                             break;
                         }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if mode == TuiMode::Browsing && !entries.is_empty() {
+                                if selected_index == 0 {
+                                    selected_index = entries.len().saturating_sub(1);
+                                } else {
+                                    selected_index = selected_index.saturating_sub(1);
+                                }
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if mode == TuiMode::Browsing && !entries.is_empty() {
+                                if selected_index + 1 >= entries.len() {
+                                    selected_index = 0;
+                                } else {
+                                    selected_index += 1;
+                                }
+                            }
+                        }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             // Ctrl+C：与 CLI 模式保持一致，视为“用户中断”，退出码应为非零
                             if !done {
-                                cancel(&handle);
+                                if let Some(ref handle) = handle_opt {
+                                    cancel(handle);
+                                }
                             }
                             exit_reason = TuiExit::Interrupted;
                             break;
@@ -170,12 +303,8 @@ fn run_tui_loop(
             }
         }
 
-        // 如果扫描已完成且无错误，可以继续等待用户退出
-        if done {
-            // 继续事件循环，等待用户按 q/Esc
-            // 但为了避免 busy loop，可以稍微 sleep
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        // 为避免 busy loop，每轮稍作休眠；在 Browsing 模式下事件轮询仍可响应按键。
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     Ok(exit_reason)
