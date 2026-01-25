@@ -23,9 +23,6 @@ use surf_core::{
 };
 use std::time::Duration;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::cmp::Ordering;
 /// TUI 退出原因，用于在 CLI 主程序中区分正常退出与用户中断退出。
 pub enum TuiExit {
     /// 正常退出（包括扫描完成后按 q/Esc 退出，或扫描过程中用户通过 q/Esc 主动放弃）。
