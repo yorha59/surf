@@ -156,7 +156,8 @@ fn main() {
         }
     }
 
-    // TUI 模式占位：当前尚未实现真正的 TUI，避免悄然忽略参数导致困惑。
+    // TUI 模式：进入全屏终端 UI。当前已实现最小扫描进度视图，并在本分支中
+    // 根据 TUI 退出原因设置不同的退出码（正常退出 0，Ctrl+C 中断为 130）。
     if args.tui {
         // 与架构设计 4.4.1 中的约定保持一致：TUI 模式不应与 --json / --limit 组合使用，
         // 因为 TUI 自身负责结果展示与分页。
@@ -170,13 +171,22 @@ fn main() {
             std::process::exit(1);
         }
 
-        // 调用 TUI 骨架
-        if let Err(e) = tui::run_tui(&args) {
-            eprintln!("TUI error: {}", e);
-            std::process::exit(1);
+        // 调用 TUI：根据退出原因区分正常退出与用户中断退出。
+        match tui::run_tui(&args) {
+            Ok(tui::TuiExit::Completed) => {
+                // 正常退出（扫描完成后退出，或用户在扫描过程中按 q/Esc 放弃）。
+                std::process::exit(0);
+            }
+            Ok(tui::TuiExit::Interrupted) => {
+                // 用户在 TUI 中触发 Ctrl+C（Control+C），与 CLI 单次模式保持一致，使用 130 退出码。
+                eprintln!("Scan interrupted by user (Ctrl+C) in TUI mode");
+                std::process::exit(130);
+            }
+            Err(e) => {
+                eprintln!("TUI error: {}", e);
+                std::process::exit(1);
+            }
         }
-        // 正常退出
-        std::process::exit(0);
     }
 
     // 创建中断标志，用于响应 Ctrl+C

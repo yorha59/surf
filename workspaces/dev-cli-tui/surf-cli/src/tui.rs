@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -16,7 +16,15 @@ use crate::Args;
 use surf_core::{ScanConfig, start_scan, poll_status, cancel};
 use std::time::Duration;
 
-pub fn run_tui(args: &Args) -> Result<()> {
+/// TUI 退出原因，用于在 CLI 主程序中区分正常退出与用户中断退出。
+pub enum TuiExit {
+    /// 正常退出（包括扫描完成后按 q/Esc 退出，或扫描过程中用户通过 q/Esc 主动放弃）。
+    Completed,
+    /// 用户在 TUI 中触发 Ctrl+C（Control+C）中断退出。
+    Interrupted,
+}
+
+pub fn run_tui(args: &Args) -> Result<TuiExit> {
     // 解析 --min-size 参数
     let min_size = crate::parse_size(&args.min_size)
         .map_err(|e| anyhow::anyhow!("Error parsing --min-size in TUI mode: {}", e))?;
@@ -65,11 +73,14 @@ fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     handle: surf_core::ScanHandle,
     root_display: String,
-) -> Result<()> {
+) -> Result<TuiExit> {
     let mut scanned_files = 0u64;
     let mut scanned_bytes = 0u64;
     let mut done = false;
     let mut error = None::<String>;
+
+    // 默认认为是“正常退出”，仅在收到 Ctrl+C 按键时标记为 Interrupted。
+    let mut exit_reason = TuiExit::Completed;
 
     loop {
         // 轮询扫描状态
@@ -135,11 +146,20 @@ fn run_tui_loop(
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
-                            // 用户请求退出
+                            // 用户请求退出（正常退出语义）
                             if !done {
                                 // 扫描尚未完成，尝试取消
                                 cancel(&handle);
                             }
+                            exit_reason = TuiExit::Completed;
+                            break;
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Ctrl+C：与 CLI 模式保持一致，视为“用户中断”，退出码应为非零
+                            if !done {
+                                cancel(&handle);
+                            }
+                            exit_reason = TuiExit::Interrupted;
                             break;
                         }
                         _ => {
@@ -158,7 +178,7 @@ fn run_tui_loop(
         }
     }
 
-    Ok(())
+    Ok(exit_reason)
 }
 
 /// 单元测试：验证 run_tui 函数签名与基本逻辑。
