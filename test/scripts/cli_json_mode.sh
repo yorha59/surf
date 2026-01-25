@@ -3,7 +3,10 @@
 # Minimal smoke test for surf CLI JSON mode
 # - Creates a tiny temp directory with a few files
 # - Runs: surf --path <tmp> --min-size 0 --limit 5 --json
-# - Verifies: exit code == 0, stdout non-empty, and contains "root" & "entries"
+# - Verifies happy path: exit code == 0, stdout non-empty, and contains
+#   "root" & "entries".
+# - Additionally verifies error path semantics for a nonexistent directory in
+#   JSON mode: non-zero exit code, stdout empty, stderr contains an error.
 
 set -u
 set -o pipefail
@@ -41,7 +44,7 @@ OUT_ERR="$TMP_DIR/stderr.log"
 rc=$?
 
 if [ $rc -ne 0 ]; then
-  echo "[cli_json_mode] surf exited with code $rc"
+  echo "[cli_json_mode] surf exited with code $rc (happy path)"
   if [ -s "$OUT_ERR" ]; then
     echo "[cli_json_mode] stderr:"
     cat "$OUT_ERR"
@@ -53,7 +56,7 @@ fi
 
 # stdout must be non-empty
 if [ ! -s "$OUT_JSON" ]; then
-  echo "[cli_json_mode] ERROR: stdout is empty in JSON mode"
+  echo "[cli_json_mode] ERROR: stdout is empty in JSON mode (happy path)"
   if [ -s "$OUT_ERR" ]; then
     echo "[cli_json_mode] stderr:"
     cat "$OUT_ERR"
@@ -74,7 +77,7 @@ if grep -q '"entries"' "$OUT_JSON"; then
 fi
 
 if [ $have_root -ne 1 ] || [ $have_entries -ne 1 ]; then
-  echo "[cli_json_mode] ERROR: missing required JSON fields (root/entries)"
+  echo "[cli_json_mode] ERROR: missing required JSON fields (root/entries) in happy path"
   echo "[cli_json_mode] root_present=$have_root entries_present=$have_entries"
   echo "[cli_json_mode] sample stdout (first 200 bytes):"
   head -c 200 "$OUT_JSON" | sed -e 's/\n/ /g'
@@ -84,7 +87,50 @@ if [ $have_root -ne 1 ] || [ $have_entries -ne 1 ]; then
   exit 1
 fi
 
+# Second scenario: nonexistent path in JSON mode should fail cleanly
+BAD_OUT_JSON="$TMP_DIR/out_nonexistent.json"
+BAD_OUT_ERR="$TMP_DIR/stderr_nonexistent.log"
+
+"$BIN_PATH" --path "$TMP_DIR/does_not_exist" --min-size 0 --limit 5 --json >"$BAD_OUT_JSON" 2>"$BAD_OUT_ERR"
+rc2=$?
+
+# Expect a non-zero exit code for an invalid path
+if [ $rc2 -eq 0 ]; then
+  echo "[cli_json_mode] ERROR: expected non-zero exit for nonexistent path, got 0"
+  if [ -s "$BAD_OUT_JSON" ]; then
+    echo "[cli_json_mode] stdout (unexpected JSON) sample (first 200 bytes):"
+    head -c 200 "$BAD_OUT_JSON" | sed -e 's/\n/ /g'
+    echo
+  fi
+  if [ -s "$BAD_OUT_ERR" ]; then
+    echo "[cli_json_mode] stderr sample (first 200 bytes):"
+    head -c 200 "$BAD_OUT_ERR" | sed -e 's/\n/ /g'
+    echo
+  fi
+  echo "FAIL"
+  echo "EXIT_CODE:$rc2"
+  exit 1
+fi
+
+# On error, stdout should be empty so that JSON consumers are not confused
+if [ -s "$BAD_OUT_JSON" ]; then
+  echo "[cli_json_mode] ERROR: stdout should be empty on error for nonexistent path"
+  echo "[cli_json_mode] unexpected stdout sample (first 200 bytes):"
+  head -c 200 "$BAD_OUT_JSON" | sed -e 's/\n/ /g'
+  echo
+  echo "FAIL"
+  echo "EXIT_CODE:$rc2"
+  exit 1
+fi
+
+# stderr should contain a human-readable error message
+if [ ! -s "$BAD_OUT_ERR" ]; then
+  echo "[cli_json_mode] ERROR: stderr is empty for nonexistent path error"
+  echo "FAIL"
+  echo "EXIT_CODE:$rc2"
+  exit 1
+fi
+
 echo "PASS"
 echo "EXIT_CODE:0"
 exit 0
-
