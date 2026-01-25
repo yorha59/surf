@@ -1051,6 +1051,10 @@
       - 与 `workspaces/dev-cli-tui/surf-cli/src/main.rs` / `tui.rs` 中已经落地的 TUI 设计（参见 4.4.1~4.4.6 的架构说明及实现注记）相比，当前交付工件尚未重新构建并同步最新 CLI 形态，导致无法在交付阶段基于 release 目录验证 `TUI-BROWSE-001` 相关验收脚本（例如 Architecture.md 7.3 中预留的 `test/scripts/tui_basic_navigation.sh`）。
       - 后续在具备 Rust 2021 edition 且可访问 crates.io（或拥有完整依赖缓存）的环境中，需由人类开发者执行：`cargo build -p surf-cli --release`，将生成的 `target/release/surf` 覆盖到 `release/linux-x86_64/cli/surf`，并在此基础上新增并运行 `test/scripts/tui_basic_navigation.sh` 等 TUI 冒烟脚本，以完成基于交付工件的 TUI 端到端验收闭环。
 
+    - 现实状态注记（本次 Ralph 第 31 轮 / delivery —— CLI 冒烟脚本回归）：
+      - 在仓库根目录依次运行 `bash test/scripts/cli_oneoff_basic.sh` 与 `bash test/scripts/cli_json_mode.sh`，两个脚本在当前环境下均再次 PASS（退出码均为 0），输出包含 `PASS` 与 `EXIT_CODE:0` 标记，确认 `release/linux-x86_64/cli/surf` 现有交付二进制在基础单次模式与 JSON 模式下依然工作正常，stdout/stderr 分流行为与 PRD/Architecture 约定保持一致。
+      - 受限于运行环境无法重新构建 CLI/TUI 与服务二进制（缺少 Rust 2021 edition 或 crates.io 访问），本轮未对 `--tui` 入口或 JSON-RPC 服务形态做新增验证；TUI 端到端验收与服务模式脚本仍需在人类可控的、具备完整工具链与依赖缓存的机器上按前述步骤完成。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
