@@ -821,7 +821,16 @@
       - 构建尝试：在仓库根目录执行 `cargo build -p surf-service --release`，构建失败；关键报错为 `failed to parse the edition key`，提示当前工具链仅支持 `2015`/`2018`，无法识别 `edition = "2021"`，说明本运行环境的 Rust/Cargo 版本过旧，不满足本项目要求的 2021 edition。
       - 离线重试：执行 `cargo build -p surf-service --release --offline` 仍然失败，错误为无法下载 `anyhow v1.0.100` 等依赖且本地无缓存（`can't make HTTP request in the offline mode`），佐证当前环境既缺少新版工具链，也缺少完整依赖缓存。
       - 二进制与脚本：由于构建失败，本轮未能替换 `release/linux-x86_64/service/surf-service`，继续沿用占位二进制；在此基础上运行 `bash test/scripts/service_jsonrpc_basic.sh` 与 `bash test/scripts/service_jsonrpc_invalid_params.sh`，两个脚本均以退出码 `1` 失败，客户端侧仅看到空响应，服务 stdout 仍打印 `"JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet"` 类提示。
-      - 交付结论：在当前交付环境下，服务二进制仍停留在“占位实现 + 旧工具链”的状态，无法通过 JSON-RPC 基本/错误路径脚本；要让 `SVC-JSONRPC-001` 在交付阶段真正闭环，需在具备 Rust 2021 edition 且可访问 crates.io（或有完整镜像/缓存）的机器上构建并同步新的 `surf-service` 至 `release/linux-x86_64/service/` 后，再复跑上述脚本。
+    - 交付结论：在当前交付环境下，服务二进制仍停留在“占位实现 + 旧工具链”的状态，无法通过 JSON-RPC 基本/错误路径脚本；要让 `SVC-JSONRPC-001` 在交付阶段真正闭环，需在具备 Rust 2021 edition 且可访问 crates.io（或有完整镜像/缓存）的机器上构建并同步新的 `surf-service` 至 `release/linux-x86_64/service/` 后，再复跑上述脚本。
+
+    - 现实状态注记（本次 Ralph 第 4 轮 / delivery）：
+      - CLI 冒烟验证：在仓库根目录依次运行 `bash test/scripts/cli_oneoff_basic.sh` 与 `bash test/scripts/cli_json_mode.sh`，两个脚本在当前环境下均 PASS（退出码均为 0），输出中包含 `PASS` 与 `EXIT_CODE:0` 标记，表明 `release/linux-x86_64/cli/surf` 二进制存在且至少在帮助输出与最小 JSON 模式路径上工作正常。
+      - 服务二进制现状：本轮未再尝试构建 `surf-service`，仍沿用上一轮结论——`release/linux-x86_64/service/surf-service` 仍为早期占位实现，缺乏真实的 JSON-RPC 方法；在当前运行环境缺少 Rust 2021 edition 且无法访问 crates.io 的前提下，服务相关脚本（`test/scripts/service_jsonrpc_basic.sh` / `test/scripts/service_jsonrpc_invalid_params.sh`）预计继续 FAIL，其失败应继续理解为交付工件版本落后，而非 `workspaces/dev-service-api/surf-service` 源码逻辑本身的回归。
+      - 人工后续建议：要在交付层面真正完成 `SVC-JSONRPC-001` 的验证，建议在具备 Rust 2021 edition 且已预热依赖缓存的开发机或 CI 上执行以下步骤：
+        1. 在仓库根目录运行 `cargo build -p surf-service --release` 生成新的服务二进制；
+        2. 将生成的 `target/release/surf-service` 覆盖到 `release/linux-x86_64/service/surf-service`；
+        3. 在该环境中运行 `bash test/scripts/service_jsonrpc_basic.sh` 与 `bash test/scripts/service_jsonrpc_invalid_params.sh`，以确认 JSON-RPC 基本路径和 INVALID_PARAMS 错误路径均能通过；
+        4. 若上述脚本仍失败，再回溯到 `workspaces/dev-service-api/surf-service/src/main.rs` 与配套测试用例定位逻辑问题，并在本节追加新的“现实状态注记”。
 
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
