@@ -1041,6 +1041,11 @@
       - CLI 冒烟验证：再次在仓库根目录运行 `bash test/scripts/cli_oneoff_basic.sh` 与 `bash test/scripts/cli_json_mode.sh`，两个脚本继续 PASS（退出码均为 0），输出中包含 `PASS` 与 `EXIT_CODE:0` 标记，确认当前 `release/linux-x86_64/cli/surf` 交付二进制在基础单次模式与 JSON 模式下仍然可用。
       - 服务二进制现状：本轮未对 `release/linux-x86_64/service/surf-service` 及其 JSON-RPC 测试脚本做新的尝试，仍沿用此前“占位实现 + 构建环境受限”的结论；后续如需在交付阶段闭环 `SVC-JSONRPC-001`，仍需在人类可控的、具备 Rust 2021 edition 与 crates.io 访问能力的环境中完成重构建与脚本回归。
 
+    - 现实状态注记（本次 Ralph 第 9 轮 / delivery）：
+      - 在仓库根目录依次运行 `bash test/scripts/service_jsonrpc_basic.sh` 与 `bash test/scripts/service_jsonrpc_invalid_params.sh`，两个脚本均 FAIL（退出码均为 1），客户端侧分别报告 `ERROR: empty response`，仅能截取到服务进程 stdout 前 200 字节。
+      - `release/linux-x86_64/service/surf-service` 运行日志继续显示 `surf-service listening on 127.0.0.1:21523 (max_concurrent_scans=4, task_ttl_seconds=600).` 与 `JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet; this binary ...`，确认当前 release 目录中的服务二进制仍为仅具监听能力的占位实现，未接入 `workspaces/dev-service-api/surf-service/src/main.rs` 中已经落地的 JSON-RPC 逻辑。
+      - 在本运行环境下，由于 Rust 工具链版本过旧且缺乏 crates.io 访问/依赖缓存，短期内仍无法在本机通过 `cargo build -p surf-service --release` 重新构建并同步新版二进制；`SVC-JSONRPC-001` 的交付验证依旧需要在具备 Rust 2021 edition 与完整依赖缓存的人工/CI 环境中完成构建与脚本回归。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
