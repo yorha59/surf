@@ -815,7 +815,13 @@
       - 退出码：`1`（FAIL）
       - 输出要点：服务进程 stdout 显示 `surf-service listening on 127.0.0.1:21523 ... JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet ...`，客户端侧收到空响应。
       - 失败原因：占位二进制缺少 `Surf.Scan` / `Surf.Status` / `Surf.GetResults` / `Surf.Cancel` 的真实实现。
-      - 交付结论：当前 release 下的 `surf-service` 仍无法用于验证 JSON-RPC happy path；需在具备正常 Rust 依赖环境的机器上重新构建并同步 release 二进制后再重跑该脚本。
+    - 交付结论：当前 release 下的 `surf-service` 仍无法用于验证 JSON-RPC happy path；需在具备正常 Rust 依赖环境的机器上重新构建并同步 release 二进制后再重跑该脚本。
+
+    - 现实状态注记（本次 Ralph 第 3 轮 / delivery）：
+      - 构建尝试：在仓库根目录执行 `cargo build -p surf-service --release`，构建失败；关键报错为 `failed to parse the edition key`，提示当前工具链仅支持 `2015`/`2018`，无法识别 `edition = "2021"`，说明本运行环境的 Rust/Cargo 版本过旧，不满足本项目要求的 2021 edition。
+      - 离线重试：执行 `cargo build -p surf-service --release --offline` 仍然失败，错误为无法下载 `anyhow v1.0.100` 等依赖且本地无缓存（`can't make HTTP request in the offline mode`），佐证当前环境既缺少新版工具链，也缺少完整依赖缓存。
+      - 二进制与脚本：由于构建失败，本轮未能替换 `release/linux-x86_64/service/surf-service`，继续沿用占位二进制；在此基础上运行 `bash test/scripts/service_jsonrpc_basic.sh` 与 `bash test/scripts/service_jsonrpc_invalid_params.sh`，两个脚本均以退出码 `1` 失败，客户端侧仅看到空响应，服务 stdout 仍打印 `"JSON-RPC methods (Surf.Scan / Surf.Status / Surf.GetResults / Surf.Cancel) are not implemented yet"` 类提示。
+      - 交付结论：在当前交付环境下，服务二进制仍停留在“占位实现 + 旧工具链”的状态，无法通过 JSON-RPC 基本/错误路径脚本；要让 `SVC-JSONRPC-001` 在交付阶段真正闭环，需在具备 Rust 2021 edition 且可访问 crates.io（或有完整镜像/缓存）的机器上构建并同步新的 `surf-service` 至 `release/linux-x86_64/service/` 后，再复跑上述脚本。
 
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
