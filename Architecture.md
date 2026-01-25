@@ -626,7 +626,7 @@
 - **模式划分**（同一 `surf` 二进制内）：
   - **单次运行模式（One-off）**：默认模式，当前已经在 `workspaces/dev-cli-tui/surf-cli` 中实现，复用 `surf-core::start_scan` / `poll_status` / `collect_results`。
   - **服务模式（Service Launcher）**：当 `--service` 为 true 时，作为 `surf-service` 的启动入口（见 4.3 与 `run_service` 实现）。
-  - **TUI 模式（新设计，本轮聚焦）**：通过独立开关进入全屏交互式 UI，内部复用与单次模式一致的扫描与进度 API。
+  - **TUI 模式**：通过独立开关进入全屏交互式 UI，内部复用与单次模式一致的扫描与进度 API；当前已在 `workspaces/dev-cli-tui/surf-cli/src/main.rs:159-180` 与 `workspaces/dev-cli-tui/surf-cli/src/tui.rs:19-161` 中落地最小扫描进度界面，后续迭代在此基础上扩展目录浏览与删除功能。
 
 - **入口参数设计（MVP）**：
   - 在现有 `Args` 结构体上新增：
@@ -641,11 +641,11 @@
     - 否则 → 保持当前单次运行模式行为。
   - 参数复用：
     - `--path`、`--min-size`、`--threads` 在 TUI 模式下继续沿用，用于确定初始扫描范围与并发度；
-    - `--limit` 与 `--json` 仅对单次运行模式生效——在 `--tui` 为 true 时：
-      - 推荐行为：如用户同时指定 `--tui` 与 `--json`，CLI 直接以参数冲突报错退出（stderr 输出，exit!=0），不进入扫描；
-      - `--limit` 在 TUI 模式下不影响 UI 展示（TUI 自身控制列表分页/滚动），但为了避免歧义，也可以选择在解析阶段发出警告或错误。
+  - `--limit` 与 `--json` 仅对单次运行模式生效——在 `--tui` 为 true 时：
+    - 推荐行为：如用户同时指定 `--tui` 与 `--json`，CLI 直接以参数冲突报错退出（stderr 输出，exit!=0），不进入扫描；
+    - `--limit` 在 TUI 模式下不影响 UI 展示（TUI 自身控制列表分页/滚动），但为了避免歧义，也可以选择在解析阶段发出警告或错误。
 
-> 实现指引（面向 dev-cli-tui）：TUI 模式建议在 `main` 中通过一个清晰的分支入口（例如 `if args.tui { run_tui(args_without_service_flags); }`）与单次模式逻辑解耦，避免在同一函数中混杂表格输出与 TUI 渲染代码。`run_tui` 及其内部模块应在 `surf-cli` crate 内独立命名空间（如 `tui::app`）下实现，以便后续单元测试与重构。
+> 实现指引（面向 dev-cli-tui）：当前 `surf-cli` 已按上述思路在 `main` 中通过独立分支入口接入 TUI：当 `args.service == false && args.tui == true` 时调用 `tui::run_tui(&args)` 进入全屏界面（`workspaces/dev-cli-tui/surf-cli/src/main.rs:159-180`），其余情况保持单次模式或服务模式行为。`tui::run_tui` 与事件循环目前集中在 `src/tui.rs` 中实现，后续可按需拆分为 `tui::app` / `tui::views` 等子模块以支撑更复杂的状态机与单元测试。
 
 #### 4.4.2 TUI 视图结构与布局
 
@@ -749,9 +749,9 @@
 
 - **当前迭代目标（MVP）**：
   - 仅支持在 TUI 进程内直接调用 `surf-core` 进行本地扫描：
-    - 使用与 CLI 单次模式相同的 API：`ScanConfig` / `start_scan` / `poll_status` / `collect_results` / `cancel`；
+    - 使用与 CLI 单次模式相同的 API：`ScanConfig` / `start_scan` / `poll_status` / `cancel`；当前版本尚未在 TUI 中调用 `collect_results` 构建目录树，而是专注于实时进度展示与取消语义（`workspaces/dev-cli-tui/surf-cli/src/tui.rs:19-81`）。
     - 不通过 JSON-RPC 与 `surf-service` 通信，也不依赖持久化层。
-  - 这样可以复用现有的高性能扫描与进度快照能力，避免在 TUI 初版中引入额外的网络与任务状态复杂度。
+  - 这样可以复用现有的高性能扫描与进度快照能力，避免在 TUI 初版中引入额外的网络与任务状态复杂度；后续在浏览视图落地时再扩展到 `collect_results` 与目录聚合。
 
 - **抽象建议：TuiScanBackend**（逻辑概念，可由 dev-cli-tui 自行命名）：
   - 定义一层极薄的后端抽象，屏蔽“本地核心扫描”与“通过服务层访问远程扫描”的差异：
@@ -766,7 +766,7 @@
   - MVP 中仅实现 `LocalCore` 分支：
     - `start()`：调用 `surf-core::start_scan`，返回 `ScanHandle`；
     - `poll()`：包装 `surf-core::poll_status`，返回 `StatusSnapshot`；
-    - `collect()`：包装 `collect_results`，返回 `Vec<FileEntry>`；
+    - `collect()`：包装 `collect_results`，返回 `Vec<FileEntry>`；当前 TUI 仅复用 `start()` / `poll()` / `cancel()`，在后续实现浏览视图时再引入 `collect()`；
     - `cancel()`：包装 `cancel`。
   - 未来如需在 TUI 中支持远程/长生命周期扫描（例如连接已有 `surf-service`），可在不改变 TUI 状态机和视图结构的前提下新增 `RemoteService` 变体：
     - `start()` → JSON-RPC `Surf.Scan`；
@@ -781,7 +781,7 @@
       - 目录节点的大小为所有子文件大小之和；
       - 列表排序按大小降序，与 CLI/服务层的 TopN 语义对齐。
 
-> 现实状态注记（TUI 与 core/service 集成）：截至本轮，TUI 尚未在 `surf-cli` 代码中落地，本小节描述的是面向 `dev-cli-tui` 的目标集成形态。MVP 实现仅需要完成 `LocalCore` 后端即可支撑本地 TUI 浏览与删除；未来如需通过 JSON-RPC 访问远程扫描结果，再依据 4.3 中的服务接口扩展 `TuiScanBackend`。
+> 现实状态注记（TUI 与 core/service 集成）：截至当前迭代，TUI 已在 `surf-cli` 中以最小形态落地：`tui::run_tui` 直接基于 `ScanConfig` / `start_scan` / `poll_status` / `cancel` 在本地进程内驱动扫描，并在全屏界面中展示实时 `scanned_files` / `scanned_bytes` 与错误摘要，但尚未使用 `collect_results` 构建目录树或 TopN 视图，浏览与删除能力仍待后续迭代实现。MVP 仍聚焦于 `LocalCore` 后端；未来如需通过 JSON-RPC 访问远程扫描结果，再依据 4.3 中的服务接口扩展 `TuiScanBackend`。
 
 #### 4.4.5 删除操作与安全策略（与 6.2 对齐）
 
@@ -819,12 +819,10 @@
 
 - **完成判定（针对后续 dev-cli-tui 迭代）**：
   - 在常见终端（`xterm`、`iTerm2` 等）中，执行 `surf --tui --path <dir>`：
-    - 能进入全屏 TUI 界面，扫描过程有明确进度反馈；
-    - 扫描完成后可通过键盘导航浏览目录树/列表，查看不同条目的大小与路径；
-    - 在选中条目后按 `d` 能触发删除二次确认弹窗，并在确认后调用“移入回收站”逻辑，视图中条目被移除或标记；
-    - 按 `q` 能安全退出并恢复终端；在扫描阶段按 Ctrl+C 能中断扫描、不展示部分结果、以非零退出码结束。
+    - 当前迭代已满足：能够进入全屏 TUI 界面，扫描过程有明确进度反馈（显示 `scanned_files` / `scanned_bytes`），扫描完成或失败后在同一界面给出摘要信息，并可通过 `q`/`Esc` 退出且终端状态恢复正常；在扫描尚未完成时按 `q`/`Esc` 会调用 `surf-core::cancel` 发出取消请求。
+    - 后续迭代仍需补足：扫描完成后通过键盘导航浏览目录树/列表、查看不同条目的大小与路径；在选中条目后按 `d` 触发删除二次确认弹窗，在确认后调用“移入回收站”逻辑并在视图中移除或标记条目；在扫描阶段接管 Ctrl+C（SIGINT），做到中断扫描、不展示部分结果、以非零退出码结束，与 CLI 中断语义完全对齐。
 
-> 现实状态注记（面向 dev-cli-tui）：截至当前迭代，`surf-cli` 仅实现了 CLI 单次运行模式与服务模式启动逻辑，TUI 代码尚未存在。本小节及 4.4.1~4.4.5 的内容即为本轮为 TUI MVP 设计的架构蓝图，已足以支撑后续 dev-cli-tui 开发 Agent 在自身工作区内启动实现工作。
+> 现实状态注记（面向 dev-cli-tui）：截至当前迭代，`surf-cli` 已实现 CLI 单次运行模式、服务模式启动逻辑以及一个最小可用的 TUI 扫描视图（不含目录浏览与删除）；本小节及 4.4.1~4.4.5 的内容仍作为 TUI MVP 的完整架构蓝图，指导后续 dev-cli-tui 开发 Agent 在现有实现基础上继续演进。
 
 ### 4.5 图形界面层 (GUI Layer)
 - **模块职责**：

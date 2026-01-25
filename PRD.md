@@ -322,9 +322,15 @@
   - 在 `Browsing` 状态下，用户对当前选中条目按约定快捷键（例如 `d`）触发删除时，TUI 切换到 `ConfirmDelete` 状态：弹出明显的二次确认对话框，至少展示目标路径和大小，并用明确文案说明“该操作会将文件/目录移入系统回收站/废纸篓，而非永久删除”；只有在用户明确确认（如按 `y` 或 `Enter`）后才真正执行删除，取消（如按 `n` 或 `Esc`）不会对文件系统产生任何修改。
   - 删除操作的底层语义与 PRD 3.4 和 Architecture.md 4.4.5 / 6.2 的约定一致：成功删除时，目标条目被移入系统回收站/废纸篓而不是直接永久删除；删除失败（例如权限不足、未检测到可用回收站实现等）时，TUI 以错误提示弹窗形式提示原因，不会静默失败或造成结果列表与实际磁盘状态严重不一致。
   - TUI 模式下的退出与中断行为与 CLI 约定保持一致：在 `Browsing` 状态下按 `q` 正常退出时，进程以 0 退出码结束且不会在 stdout 再次打印扫描结果列表；在 `Scanning` 状态下收到 Ctrl+C（SIGINT）时，程序调用核心取消接口并尽快退出 TUI，恢复终端，在 stderr 输出“用户中断”类提示，并以非零退出码结束进程，不进入浏览状态、也不输出任何部分结果。
-  - impl_notes (iteration 11 / dev-cli-tui):
-    - 当前 `surf-cli` 已在参数层面为 TUI 预留入口：`workspaces/dev-cli-tui/surf-cli/src/main.rs:14-35` 中的 `Args` 结构体定义了 `--tui` 布尔开关，默认值为 `false`，并在单元测试中验证默认关闭与可显式开启（`workspaces/dev-cli-tui/surf-cli/src/main.rs:390-400`）。
-    - 模式选择顺序已经按 Architecture.md 4.4.1 约定落地：`main` 函数中首先判断 `args.service`，仅当未开启服务模式且 `args.tui == true` 时才进入 TUI 分支，避免 `--service` 与 `--tui` 同时出现时行为不明确（`workspaces/dev-cli-tui/surf-cli/src/main.rs:134-173`）。
-    - 为避免参数组合产生歧义，当前 TUI 分支在检测到 `--tui` 与 `--json` 同时指定时，会直接在 stderr 提示 "--json cannot be used together with --tui; TUI mode manages its own output." 并以非零状态码退出；同理，当 `--tui` 下 `--limit` 被设置为不同于默认值 20 时会提示 "--limit is not supported in --tui mode; TUI will control list pagination." 并立即退出（`workspaces/dev-cli-tui/surf-cli/src/main.rs:157-169`），与架构中“`--limit` 与 `--json` 不应对 TUI 生效”的约定保持一致。
-    - 出于对用户预期的保护，当前实现中 `--tui` 分支在通过上述参数检查后，会在 stderr 输出 "TUI mode (--tui) is not implemented yet in this build. Please use the default CLI mode without --tui." 并以退出码 1 结束进程（`workspaces/dev-cli-tui/surf-cli/src/main.rs:171-172`），即明确告知 TUI 功能尚未实现，而不是静默回退到普通 CLI 表格模式。
-    - 基于上述实现，本 story 的参数层面约定已在 CLI 中初步对齐：`--tui` 作为独立模式开关存在，且不会与 `--json`/`--limit`/`--service` 组合产生隐性行为；真正的全屏 TUI UI（包括 `Scanning`/`Browsing`/`ConfirmDelete`/`Deleting` 状态机、目录树视图与“移入回收站”删除语义）尚未在代码层落地，本 story 仍保持 `status: todo`。
+  - impl_notes (iteration 14 / dev-cli-tui):
+   - `surf-cli` 已在参数层面为 TUI 提供正式入口：`workspaces/dev-cli-tui/surf-cli/src/main.rs:16-37` 中的 `Args` 结构体定义了 `--tui` 布尔开关（默认 `false`），并在单元测试中验证默认关闭与可显式开启（`workspaces/dev-cli-tui/surf-cli/src/main.rs:397-407`）。
+   - 模式选择顺序遵循 Architecture.md 4.4.1 约定：`main` 函数中首先判断 `args.service`，仅当未开启服务模式且 `args.tui == true` 时进入 TUI 分支，避免 `--service` 与 `--tui` 同时出现时行为不明确（`workspaces/dev-cli-tui/surf-cli/src/main.rs:136-180`）。
+   - 为避免参数组合产生歧义，`--tui` 分支在检测到 `--tui` 与 `--json` 同时指定时，会在 stderr 提示 "--json cannot be used together with --tui; TUI mode manages its own output." 并以非零状态码退出；同理，当 `--tui` 下 `--limit` 被设置为不同于默认值 20 时会提示 "--limit is not supported in --tui mode; TUI will control list pagination." 并立即退出（`workspaces/dev-cli-tui/surf-cli/src/main.rs:161-170`），与架构中“`--limit` 与 `--json` 不应对 TUI 生效”的约定保持一致。
+   - 通过上述参数检查后，`main` 会调用 `tui::run_tui(&args)` 进入真实的全屏 TUI 事件循环（`workspaces/dev-cli-tui/surf-cli/src/main.rs:173-177`），不再简单打印“尚未实现”占位提示。
+   - `tui::run_tui` 当前实现了一个最小可用的扫描进度界面：在进入备用屏幕并启用原始模式后，构造 `ScanConfig { root, min_size, threads }` 并调用 `surf-core::start_scan` 启动后台扫描；随后在事件循环中周期性调用 `poll_status(&handle)` 获取 `scanned_files` / `scanned_bytes` / `done` / `error` 等字段，并用 `ratatui` 渲染包含标题、内容区域与状态栏的三段式布局（`workspaces/dev-cli-tui/surf-cli/src/tui.rs:19-129`）。
+   - 内容区域在三种状态下展示不同信息：
+     - 正常扫描中：显示当前扫描根路径、已扫描文件数与字节数，并在文案中提示“Future features: Browse and navigate / Safe delete”；
+     - 扫描完成且无错误：显示 "Scan completed: <files>, <bytes>" 并提示用户按 `q`/`Esc` 退出；
+     - 扫描出错：显示错误摘要（`StatusSnapshot.error` 文本）并提示按 `q`/`Esc` 退出（`workspaces/dev-cli-tui/surf-cli/src/tui.rs:109-115`）。
+   - 事件处理方面，TUI 在每一帧之后以非阻塞方式轮询键盘事件：当用户按下 `q` 或 `Esc` 时，若扫描尚未完成则调用 `surf_core::cancel(&handle)` 发出“最佳努力”取消信号，然后退出事件循环；若扫描已完成或出错，则直接退出，仅通过退出码区分是否由上层调用设置非零退出码（`workspaces/dev-cli-tui/surf-cli/src/tui.rs:131-159`）。当前版本尚未接管 Ctrl+C（SIGINT），TUI 仍主要依赖 `q`/`Esc` 进行退出控制。
+   - 基于上述实现，本 story 在“Scanning 状态下的进度反馈”和“在 TUI 内发起取消请求并退出”的行为上已经有了最小落地，但尚未提供目录树/列表浏览、键盘导航与“移入回收站”的删除功能；因此 story 状态仍保持 `status: todo`，后续迭代需要围绕 `Browsing` / `ConfirmDelete` / `Deleting` 等状态机以及目录聚合与删除适配层补全剩余验收条目。
