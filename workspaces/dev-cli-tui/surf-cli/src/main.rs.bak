@@ -170,13 +170,8 @@ fn main() {
             std::process::exit(1);
         }
 
-        // 调用 TUI 骨架
-        if let Err(e) = tui::run_tui(&args) {
-            eprintln!("TUI error: {}", e);
-            std::process::exit(1);
-        }
-        // 正常退出
-        std::process::exit(0);
+        eprintln!("TUI mode (--tui) is not implemented yet in this build. Please use the default CLI mode without --tui.");
+        std::process::exit(1);
     }
 
     // 创建中断标志，用于响应 Ctrl+C
