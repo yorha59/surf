@@ -2,6 +2,23 @@
 //!
 //! 当前仅提供占位界面，支持按 'q' 或 Esc 退出。
 //! 后续迭代将接入实际的扫描与浏览逻辑。
+//! TUI 模块，用于 `--tui` 模式。
+//!
+//! 提供扫描进度显示、结果浏览与详情查看功能。
+//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
+
+//! TUI 模块，用于 `--tui` 模式。
+//!
+//! 提供扫描进度显示、结果浏览与详情查看功能。
+//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
+//! TUI 模块，用于 `--tui` 模式。
+//!
+//! 提供扫描进度显示、结果浏览与详情查看功能。
+//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
+//! TUI 模块，用于 `--tui` 模式。
+//!
+//! 提供扫描进度显示、结果浏览与详情查看功能。
+//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -23,9 +40,6 @@ use surf_core::{
 };
 use std::time::Duration;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::cmp::Ordering;
 /// TUI 退出原因，用于在 CLI 主程序中区分正常退出与用户中断退出。
 pub enum TuiExit {
     /// 正常退出（包括扫描完成后按 q/Esc 退出，或扫描过程中用户通过 q/Esc 主动放弃）。
@@ -191,30 +205,87 @@ fn run_tui_loop(
                 }
                 TuiMode::Browsing => {
                     use ratatui::widgets::{Block, Borders, List, ListItem};
+                    use ratatui::layout::{Direction, Constraint, Layout};
 
-                    let items: Vec<ListItem> = entries
-                        .iter()
-                        .take(usize::min(entries.len(), 100))
-                        .enumerate()
-                        .map(|(idx, entry)| {
-                            let prefix = if idx == selected_index { "▶" } else { " " };
-                            let line = format!(
-                                "{} {:>12}  {}",
-                                prefix,
-                                entry.size,
-                                entry.path.display()
+                    // 根据宽度决定是否拆分左右区域
+                    let content_area = chunks[1];
+                    if content_area.width < 40 {
+                        // 宽度过窄，退化为单列列表
+                        let items: Vec<ListItem> = entries
+                            .iter()
+                            .take(usize::min(entries.len(), 100))
+                            .enumerate()
+                            .map(|(idx, entry)| {
+                                let prefix = if idx == selected_index { "▶" } else { " " };
+                                let line = format!(
+                                    "{} {:>12}  {}",
+                                    prefix,
+                                    entry.size,
+                                    entry.path.display()
+                                );
+                                ListItem::new(line)
+                            })
+                            .collect();
+
+                        let list = List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title("Scan results (Top by size)"),
                             );
-                            ListItem::new(line)
-                        })
-                        .collect();
+                        frame.render_widget(list, content_area);
+                    } else {
+                        // 宽度足够，拆分为左右区域（70% 列表，30% 详情）
+                        let chunks_h = Layout::default()
+                            .direction(Direction::Horizontal)
+                            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+                            .split(content_area);
+                        let list_area = chunks_h[0];
+                        let detail_area = chunks_h[1];
 
-                    let list = List::new(items)
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .title("Scan results (Top by size)"),
-                        );
-                    frame.render_widget(list, chunks[1]);
+                        // 左侧列表（与之前相同）
+                        let items: Vec<ListItem> = entries
+                            .iter()
+                            .take(usize::min(entries.len(), 100))
+                            .enumerate()
+                            .map(|(idx, entry)| {
+                                let prefix = if idx == selected_index { "▶" } else { " " };
+                                let line = format!(
+                                    "{} {:>12}  {}",
+                                    prefix,
+                                    entry.size,
+                                    entry.path.display()
+                                );
+                                ListItem::new(line)
+                            })
+                            .collect();
+                        let list = List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .title("Scan results (Top by size)"),
+                            );
+                        frame.render_widget(list, list_area);
+
+                        // 右侧详情区域
+                        let detail_block = Block::default()
+                            .borders(Borders::ALL)
+                            .title("当前条目详情");
+                        let detail_text = if entries.is_empty() {
+                            "暂无扫描结果".to_string()
+                        } else {
+                            let entry = &entries[selected_index];
+                            let total = entries.len();
+                            let current = selected_index + 1;
+                            format!(
+                                "位置: {} / {}\n大小: {} 字节\n路径:\n{}",
+                                current, total, entry.size, entry.path.display()
+                            )
+                        };
+                        let detail_paragraph = ratatui::widgets::Paragraph::new(detail_text)
+                            .block(detail_block);
+                        frame.render_widget(detail_paragraph, detail_area);
+                    }
                 }
                 TuiMode::Error => {
                     let content_text = if let Some(err) = &error {
@@ -240,7 +311,7 @@ fn run_tui_loop(
                     let total = entries.len();
                     let current = if total == 0 { 0 } else { selected_index + 1 };
                     format!(
-                        "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  q/Esc: 退出",
+                        "Status: Browsing results ({} / {}) | ↑/k ↓/j: 移动  q/Esc: 退出  (详情: 右侧窗格)",
                         current, total
                     )
                 }
