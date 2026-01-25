@@ -28,6 +28,12 @@ struct Args {
     #[arg(long = "json")]
     json: bool,
 
+    /// Run interactive terminal UI (TUI) instead of one-off scan.
+    ///
+    /// 当前仅作为占位入口，TUI 仍在开发中；指定该参数时会给出明确错误提示并退出非零状态码。
+    #[arg(long = "tui")]
+    tui: bool,
+
     /// Number of threads to use for scanning (>= 1). Defaults to logical CPU count.
     #[arg(
         long = "threads",
@@ -146,6 +152,24 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    // TUI 模式占位：当前尚未实现真正的 TUI，避免悄然忽略参数导致困惑。
+    if args.tui {
+        // 与架构设计 4.4.1 中的约定保持一致：TUI 模式不应与 --json / --limit 组合使用，
+        // 因为 TUI 自身负责结果展示与分页。
+        if args.json {
+            eprintln!("--json cannot be used together with --tui; TUI mode manages its own output.");
+            std::process::exit(1);
+        }
+
+        if args.limit != 20 {
+            eprintln!("--limit is not supported in --tui mode; TUI will control list pagination.");
+            std::process::exit(1);
+        }
+
+        eprintln!("TUI mode (--tui) is not implemented yet in this build. Please use the default CLI mode without --tui.");
+        std::process::exit(1);
     }
 
     // 创建中断标志，用于响应 Ctrl+C
@@ -361,5 +385,17 @@ mod tests {
         assert!(args.service);
         assert_eq!(args.port, 4321);
         assert_eq!(args.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn tui_flag_defaults_to_false() {
+        let args = Args::parse_from(["surf"]);
+        assert!(!args.tui, "tui mode should be disabled by default");
+    }
+
+    #[test]
+    fn tui_flag_can_be_enabled() {
+        let args = Args::parse_from(["surf", "--tui"]);
+        assert!(args.tui);
     }
 }
