@@ -20,8 +20,6 @@
 //! 提供扫描进度显示、结果浏览与详情查看功能。
 //! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
 
-mod tui_model;
-use tui_model::{build_tree, DirNode, NodeType};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -117,7 +115,6 @@ fn run_tui_loop(
     let mut error = None::<String>;
 
     // 当前模式与浏览列表状态。
-    let mut root_node: Option<DirNode> = None;
     let mut mode = TuiMode::Scanning;
     let mut entries: Vec<FileEntry> = Vec::new();
     let mut selected_index: usize = 0;
@@ -144,7 +141,6 @@ fn run_tui_loop(
                 match collect_results(handle_opt.take().unwrap()) {
                     Ok(collected) => {
                         entries = collected;
-                        root_node = Some(build_tree(&args.path, collected.clone()));
                         selected_index = 0;
                         mode = TuiMode::Browsing;
                     }
