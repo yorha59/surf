@@ -1064,6 +1064,14 @@
       - 结论与现状关系：当前 release 目录中的 CLI 二进制仍未包含 `--tui` 入口，无法进入 TUI 模式，导致该冒烟脚本失败；与 7.3 既有注记关于“release 二进制不含 TUI 开关”的结论一致，属交付工件版本落后而非源码逻辑回归。
       - 后续建议（需在具备 Rust 2021 工具链与依赖缓存/网络环境的机器上执行）：在开发机或 CI 上运行 `cargo build -p surf-cli --release` 重新构建 `surf`，将生成的 `target/release/surf` 覆盖到 `release/linux-x86_64/cli/surf` 后，重跑本脚本与其他 TUI 用例以完成交付端到端验收。
 
+    - 现实状态注记（本次 Ralph 第 34 轮 / delivery —— TUI 冒烟脚本复查）：
+      - 脚本：`test/scripts/tui_basic_navigation.sh`
+      - 二进制：`release/linux-x86_64/cli/surf`
+      - 执行命令：`bash test/scripts/tui_basic_navigation.sh`
+      - 退出码：`1`（FAIL）
+      - 错误摘要：`--tui flag not found in surf --help output`；帮助输出前 200 字节样例仍为以 `Disk space analyzer (Surf)\n\nUsage: surf [OPTIONS]` 开头的旧版 CLI 说明，未包含 `--tui` 相关描述。
+      - 结论与现状关系：与第 33 轮结论一致，当前交付工件中的 `release/linux-x86_64/cli/surf` 仍未同步包含 TUI 入口的新版二进制，TUI 冒烟脚本继续 FAIL；该问题属于交付阶段二进制版本滞后，需要在人类可控、具备 Rust 2021 工具链与 crates.io/镜像访问的环境中完成重构建与二进制同步后，方可在本环境中通过脚本重新验收。
+
   - `dev-core-scanner`（工作区根：`workspaces/dev-core-scanner/`）
     - 目标 crate：`surf-core`，类型：库 crate。
     - 推荐在 `workspaces/dev-core-scanner/surf-core/` 下执行：
