@@ -81,7 +81,7 @@ struct JsonOutput {
     entries: Vec<JsonEntry>,
 }
 
-fn parse_size(input: &str) -> Result<u64, String> {
+pub(crate) fn parse_size(input: &str) -> Result<u64, String> {
     let s = input.trim();
     if s.is_empty() {
         return Ok(0);

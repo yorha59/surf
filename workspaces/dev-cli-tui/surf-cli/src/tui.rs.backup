@@ -16,24 +16,11 @@ use crate::Args;
 use surf_core::{ScanConfig, start_scan, poll_status, cancel};
 use std::time::Duration;
 
-pub fn run_tui(args: &Args) -> Result<()> {
-    // 解析 --min-size 参数
-    let min_size = crate::parse_size(&args.min_size)
-        .map_err(|e| anyhow::anyhow!("Error parsing --min-size in TUI mode: {}", e))?;
-
-    // 构造扫描配置
-    let config = ScanConfig {
-        root: args.path.clone(),
-        min_size,
-        threads: args.threads,
-    };
-
-    // 启动扫描
-    let handle = start_scan(config)
-        .context("start scan in TUI mode")?;
-
-    let root_display = args.path.display().to_string();
-
+/// 运行 TUI 主循环。
+///
+/// 进入原始模式与备用屏幕，启动事件循环，绘制占位界面，
+/// 直到用户按下 'q' 或 Esc 时退出。
+pub fn run_tui(_args: &Args) -> Result<()> {
     // 设置终端：进入备用屏幕、原始模式，启用鼠标捕获
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = stdout();
@@ -45,7 +32,7 @@ pub fn run_tui(args: &Args) -> Result<()> {
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     // 主循环
-    let result = run_tui_loop(&mut terminal, handle, root_display);
+    let result = run_tui_loop(&mut terminal);
 
     // 恢复终端：离开备用屏幕、禁用原始模式，禁用鼠标捕获
     disable_raw_mode().context("disable raw mode")?;
@@ -60,25 +47,8 @@ pub fn run_tui(args: &Args) -> Result<()> {
 }
 
 /// TUI 事件循环。
-/// TUI 事件循环。
-fn run_tui_loop(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    handle: surf_core::ScanHandle,
-    root_display: String,
-) -> Result<()> {
-    let mut scanned_files = 0u64;
-    let mut scanned_bytes = 0u64;
-    let mut done = false;
-    let mut error = None::<String>;
-
+fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     loop {
-        // 轮询扫描状态
-        let status = poll_status(&handle);
-        scanned_files = status.progress.scanned_files;
-        scanned_bytes = status.progress.scanned_bytes;
-        done = status.done;
-        error = status.error.clone();
-
         // 绘制当前帧
         terminal.draw(|frame| {
             let area = frame.size();
@@ -101,45 +71,35 @@ fn run_tui_loop(
                 .split(area);
 
             // 标题
-            let title = ratatui::widgets::Paragraph::new("Surf TUI (scanning)")
+            let title = ratatui::widgets::Paragraph::new("Surf TUI (placeholder)")
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Cyan));
             frame.render_widget(title, chunks[0]);
 
-            // 内容区域：显示扫描进度或错误
-            let content_text = if let Some(err) = &error {
-                format!("Scan error: {}\n\nPress 'q' or Esc to exit.", err)
-            } else if done {
-                format!("Scan completed: {} files, {} bytes.\n\nPress 'q' or Esc to exit.", scanned_files, scanned_bytes)
-            } else {
-                format!("Scanning {} ...\n\nFiles: {}\nBytes: {}\n\nFuture features:\n• Browse and navigate\n• Safe delete", root_display, scanned_files, scanned_bytes)
-            };
-            let content = ratatui::widgets::Paragraph::new(content_text)
-                .alignment(ratatui::layout::Alignment::Center);
+            // 内容提示
+            let content = ratatui::widgets::Paragraph::new(
+                "TUI 正在开发中，目前仅支持按 'q' 或 Esc 退出\n\n\
+                 后续迭代将实现：\n\
+                 • 扫描目录并显示文件列表\n\
+                 • 浏览与导航\n\
+                 • 安全删除文件",
+            )
+            .alignment(ratatui::layout::Alignment::Center);
             frame.render_widget(content, chunks[1]);
 
             // 状态栏
-            let status_text = if done {
-                format!("Status: Scan completed. files={}, bytes={} | q/Esc: 退出", scanned_files, scanned_bytes)
-            } else {
-                format!("Status: Scanning ... files={}, bytes={} | q/Esc: 退出", scanned_files, scanned_bytes)
-            };
-            let status = ratatui::widgets::Paragraph::new(status_text)
+            let status = ratatui::widgets::Paragraph::new("q: 退出 | Esc: 退出")
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Gray));
             frame.render_widget(status, chunks[2]);
         })?;
 
         // 处理事件（非阻塞）
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 // 只处理按键按下事件，避免重复触发
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
                             // 用户请求退出
-                            if !done {
-                                // 扫描尚未完成，尝试取消
-                                cancel(&handle);
-                            }
                             break;
                         }
                         _ => {
@@ -148,13 +108,6 @@ fn run_tui_loop(
                     }
                 }
             }
-        }
-
-        // 如果扫描已完成且无错误，可以继续等待用户退出
-        if done {
-            // 继续事件循环，等待用户按 q/Esc
-            // 但为了避免 busy loop，可以稍微 sleep
-            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
