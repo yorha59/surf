@@ -115,23 +115,6 @@ pub struct ScanResult {
     pub stale_files: Vec<FileEntry>,
 }
 
-/// 扫描过程中用于收集统计信息的内部结构
-struct ScanCollector {
-    /// 总文件数（经过 min_size 过滤后）
-    total_files: u64,
-    /// 总目录数
-    total_dirs: u64,
-    /// 总大小（字节，经过 min_size 过滤后）
-    total_size_bytes: u64,
-    /// 按扩展名统计的映射表
-    by_extension_map: HashMap<String, ExtensionStat>,
-    /// Top N 大文件列表（按大小降序），内部使用向量维护，上限为 TOP_FILES_LIMIT
-    top_files: Vec<FileEntry>,
-    /// 陈旧文件列表
-    stale_files: Vec<FileEntry>,
-    /// 当前时间，用于陈旧文件判断
-    now: SystemTime,
-}
 /// 核心扫描引擎
 pub struct Scanner;
 
