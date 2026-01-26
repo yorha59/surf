@@ -99,8 +99,14 @@ run_coco_in_tmux() {
     local prompt="$2"
     local session_name="surf-ralph-${step}"
     
-    # 清理可能存在的旧会话
-    tmux kill-session -t "$session_name" 2>/dev/null || true
+    # 清理所有旧的 surf-ralph-* 会话
+    echo "[ralph] 清理旧的 tmux 会话..." >&2
+    local old_sessions
+    old_sessions=$(tmux list-sessions 2>/dev/null | grep -E '^surf-ralph-' | cut -d: -f1) || true
+    for old_session in $old_sessions; do
+        echo "[ralph] 终止旧会话: $old_session" >&2
+        tmux kill-session -t "$old_session" 2>/dev/null || true
+    done
     sleep 1
     
     # 创建 tmux 会话，运行 coco 但不传递 prompt

@@ -687,3 +687,67 @@ fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, resu
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_parse_size_string_units() {
+        assert_eq!(parse_size_string("100B").unwrap(), 100);
+        assert_eq!(parse_size_string("1KB").unwrap(), 1024);
+        assert_eq!(parse_size_string("1MB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_string("1.5MB").unwrap(), 1_572_864);
+        assert!(parse_size_string("10XB").is_err());
+        assert!(parse_size_string("").is_err());
+    }
+
+    #[test]
+    fn test_cli_try_parse_from() {
+        let args = [
+            "surf",
+            "--path", "/tmp",
+            "--threads", "4",
+            "--min-size", "10KB",
+            "--limit", "10",
+            "--stale-days", "7",
+            "--host", "0.0.0.0",
+            "--port", "4321",
+            "--json",
+        ];
+        let cli = Cli::try_parse_from(&args).expect("CLI 参数解析失败");
+        assert_eq!(cli.path, PathBuf::from("/tmp"));
+        assert_eq!(cli.threads, Some(4));
+        assert_eq!(cli.min_size.as_deref(), Some("10KB"));
+        assert_eq!(cli.limit, 10);
+        assert_eq!(cli.stale_days, Some(7));
+        assert_eq!(cli.host, "0.0.0.0");
+        assert_eq!(cli.port, 4321);
+        assert!(cli.json);
+        assert!(!cli.service);
+        assert!(!cli.tui);
+    }
+
+    #[test]
+    fn test_cli_to_scan_request_fields() {
+        let cli = Cli {
+            path: PathBuf::from("."),
+            threads: Some(2),
+            min_size: Some("2KB".to_string()),
+            limit: 5,
+            stale_days: Some(30),
+            service: false,
+            port: 1234,
+            host: "127.0.0.1".to_string(),
+            json: false,
+            tui: false,
+        };
+        let req = cli.to_scan_request().expect("转换 ScanRequest 失败");
+        assert_eq!(req.root_path, PathBuf::from("."));
+        assert_eq!(req.threads, Some(2));
+        assert_eq!(req.min_size, Some(2048));
+        assert_eq!(req.limit, Some(5));
+        assert_eq!(req.stale_days, Some(30));
+    }
+}

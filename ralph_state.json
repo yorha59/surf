@@ -1,9 +1,9 @@
 {
   "phase": "development",
-  "iteration": 4,
-  "reason": "本轮完成 dev-cli-tui 参数校验与友好错误输出，并在小目录完成 JSON 自测；仍有测试与文档项未完成，保持开发阶段。",
+  "iteration": 5,
+  "reason": "本轮为 dev-cli-tui 增加 CLI 单元测试（parse_size 与 Clap 解析），3 项测试通过；仍有集成测试与文档项未完成，保持开发阶段。",
   "notes": [
-    "dev-cli-tui: 参数验证与错误提示完成；TopN/扩展名展示正常",
+    "dev-cli-tui: 参数验证与错误提示完成；新增3项单元测试通过",
     "dev-cli-tui: 自测命令运行通过（delivery-runner/test/tmp/tc3.Eqte）",
     "dev-core-scanner: 并行遍历、TopN、扩展名统计与陈旧文件识别已实现并通过单元测试"
   ]
