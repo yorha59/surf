@@ -91,10 +91,18 @@
      - 文件级结果列表（可分页或流式）；
      - 类型分布与时间分析结果。
 
-5. （可选扩展）文件删除能力：
-   - 核心层仅提供“删除请求”接口（例如删除指定路径、移动到回收站/废纸篓等），具体行为需与不同前端的 UX 规范保持一致；
-   - 由于当前 PRD 在不同形态下对删除操作的描述略有差异，删除行为的统一策略需待人类确认（见 `human.md` 中相关问题）。
-
+5. 文件删除能力（受平台与策略约束）：
+   - 提供统一的库级删除接口（示意）：
+     - `delete_entry(path: &Path, options: DeleteOptions) -> DeleteResult`；
+     - `DeleteOptions` 字段：
+       - `mode: DeleteMode`：`MoveToTrash` / `Permanent`；
+       - `origin: DeleteOrigin`：调用来源（`Cli` / `Tui` / `Gui` / `Service`），用于审计与策略演进；
+       - `dry_run: bool`：只做权限与可行性检查，不真正删除。
+   - 核心层不直接决定「是否需要二次确认」，而是由调用方（CLI/TUI/GUI）在 UI 层完成确认后再调用删除接口；
+   - 平台默认语义：
+     - macOS：当 `mode = MoveToTrash` 时使用系统废纸篓语义（与 Finder 的 Move to Trash 一致），不直接执行永久删除；
+     - Linux：优先尝试按照 XDG Trash 规范实现「移动到回收站」，若检测到环境不支持（无标准 Trash 目录等），则退化为永久删除，并在 `DeleteResult` 中显式标记 `effective_mode = Permanent`，由上层 UI 告知用户「将被永久删除」。
+   - 最终是否在 Linux 上强制启用回收站语义由人类在 `human.md` 中决策，当前推荐策略与默认行为见第 5.3 节。
 **不负责的内容：**
 
 - 不直接处理网络协议与 JSON-RPC 编解码；
@@ -233,15 +241,64 @@
 5. 扫描完成后，GUI 调用 `scan.result` 获取 `ScanResult`，用于渲染 Treemap 和列表视图。
 6. 服务层可将 `ScanResult` 摘要写入历史存储，以供 GUI 列表展示与快速重跑。
 
-### 5.3 删除操作（跨形态）
+### 5.3 删除操作（跨形态，一致策略）
 
-> 由于 PRD 中关于删除能力在不同形态下的描述存在一定差异（TUI 删除 vs GUI Move to Trash），本初稿仅给出高层数据流，统一策略需待人类确认并在后续迭代中补充。
+1. **全局原则**
+   - 采用「软删除优先」策略：在支持的情况下优先移动到回收站/废纸篓，仅在用户显式选择或环境不支持时执行永久删除；
+   - 所有形态在执行删除前必须明确告知本次操作是「移至回收站/废纸篓」还是「永久删除」。
 
-1. CLI/TUI 或 GUI 侧用户选中某文件/目录，触发“删除”或“移至废纸篓”操作；
-2. 前端通过本地桥接或 JSON-RPC 方法（如 `file.delete`）向服务层/核心层发起删除请求，包含路径与操作类型；
-3. 服务层/核心层执行删除或移动到废纸篓操作，并返回成功/失败结果及错误原因；
-4. 前端更新界面并记录操作结果。
+2. **平台语义**
+   - **macOS**：
+     - GUI（Tauri）与 TUI 通过核心库的 `DeleteMode::MoveToTrash` 模式调用删除接口，对应系统废纸篓语义；
+     - 初始版本不提供默认永久删除入口，如需永久删除必须通过额外选项（例如「按住修饰键 + 点击」或显式切换为“永久删除”模式）触发，并附带更强的二次确认文案。
+   - **Linux**：
+     - 操作系统本身没有统一 API，但常见桌面环境遵循 XDG Trash 规范；核心/服务层在 `mode = MoveToTrash` 时应按 XDG 规范最佳努力实现「移动到回收站」；
+     - 若检测到环境不具备 Trash 条件（例如纯服务器环境），则退化为永久删除，删除结果中通过 `effective_mode = "permanent"` 标记，由上层 UI 告知用户「将被永久删除」。
 
+3. **形态与确认流程**
+   - **CLI**：
+     - 当前版本 CLI 不直接暴露删除入口，仅提供扫描与结果展示能力，避免脚本化场景误删；
+     - 如未来扩展 CLI 删除子命令，应遵循：显式子命令（如 `surf delete`）、默认软删除（如可用）、并要求 `--yes` / `--permanent` 等强提示参数后才执行，无隐式删除行为。
+   - **TUI**：
+     - TUI 是终端内唯一支持删除的形态，删除入口通常由快捷键或菜单触发；
+     - 在调用核心删除接口前必须弹出二次确认对话框，文案需包含：目标路径、预计操作（「移至回收站」或「永久删除」）以及平台差异说明（尤其是 Linux 上可能为永久删除）；
+     - 默认策略：
+       - macOS TUI：默认使用 `mode = MoveToTrash`，与 GUI 一致；
+       - Linux TUI：默认使用 `mode = Permanent`，并在确认文案中强调「将被永久删除」，用户可通过配置文件或设置界面将默认行为切换为「尽可能移动到 Trash」。
+   - **macOS GUI**：
+     - 仅在 macOS GUI 中暴露「Move to Trash」入口，对应 `mode = MoveToTrash`；
+     - 初始版本不提供 GUI 侧「永久删除」操作，避免与用户对 Finder 习惯相违背；如未来新增「永久删除」，必须通过单独菜单项 + 更严格二次确认实现。
+
+4. **核心与服务接口契约**
+   - 核心扫描引擎：
+     - 提供 `delete_entry(path: &Path, options: DeleteOptions) -> DeleteResult` 接口；
+     - `DeleteOptions` 关键字段：
+       - `mode: "trash" | "permanent"`（必填或由调用方依策略填充）；
+       - `origin: "cli" | "tui" | "gui" | "service"`；
+       - `dry_run: bool`；
+     - `DeleteResult` 至少包含：
+       - `success: bool`；
+       - `effective_mode: "trash" | "permanent"`；
+       - `error: { code: i32, message: string }?`。
+   - JSON-RPC 服务层：
+     - 新增 `file.delete` 方法（示意）：
+       - **请求参数（params 对象）：**
+         - `path: string`：待删除的文件或目录路径；
+         - `mode: string?`：`"trash" | "permanent"`，可选，缺省时由服务根据平台与配置选择默认策略；
+         - `dry_run: bool?`：可选，若为 `true` 则仅做检查、返回是否可删除；
+       - **返回结果（result 对象）：**
+         - `success: bool`；
+         - `effective_mode: "trash" | "permanent"`；
+         - `error: { code: i32, message: string }?`。
+
+5. **人类可配置与待决策点**
+   - 是否在 Linux 平台上将 XDG Trash 支持视为「默认开启」（失败时回退为永久删除），还是仅在用户显式开启「使用回收站」配置时才走 Trash 流程；
+   - 是否允许通过全局配置文件字段（如 `default_delete_mode`、`allow_permanent_delete`）覆盖上述默认行为。
+
+> 当前设计建议：
+> - macOS：GUI/TUI 统一采用「Move to Trash」作为默认删除动作，不暴露无保护的永久删除入口；
+> - Linux：TUI 默认使用永久删除 + 强提示，允许通过配置开启「尽可能移动到 Trash」；
+> - CLI：本轮不提供删除能力，避免破坏现有脚本兼容性。最终策略以 `human.md` 中的「人类决策」为准，如人类决策调整默认模式，仅需更新配置与本节文案，接口契约保持不变。
 ## 6. 外部接口与数据契约（初稿）
 
 ### 6.1 CLI 参数族与输出约定

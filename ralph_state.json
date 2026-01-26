@@ -1,9 +1,9 @@
 {
-  "phase": "development",
-  "iteration": 1,
-  "reason": "Architecture.md 初稿已创建并定义了模块划分与开发 Agent 列表，可以启动开发阶段。",
+  "phase": "design",
+  "iteration": 2,
+  "reason": "human.md 中存在删除操作统一策略问题需要设计确认，回退到设计阶段。",
   "notes": [
-    "开发 Agent: dev-core-scanner, dev-cli-tui, dev-service-api, dev-macos-gui",
-    "Architecture.md: 覆盖模块职责、接口契约、交付视图"
+    "待处理问题：删除操作跨平台跨形态统一策略",
+    "相关文件：human.md, Architecture.md"
   ]
 }
