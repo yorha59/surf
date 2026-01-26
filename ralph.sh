@@ -10,6 +10,19 @@ if [[ ! -f "PRD.md" || ! -f "AGENTS.md" ]]; then
   exit 1
 fi
 
+STATE_FILE="ralph_state.json"
+if [[ ! -f "$STATE_FILE" ]]; then
+  cat >"$STATE_FILE" <<'EOF'
+{
+  "phase": "design",
+  "iteration": 0,
+  "reason": "初始状态：如 Architecture.md 缺失或设计尚未完成，应先进入设计阶段由 design-architect 创建/更新架构文档。",
+  "notes": []
+}
+EOF
+  echo "[ralph] 初始化全局状态文件 ralph_state.json，phase=design" >&2
+fi
+
 if [[ ! -f "Architecture.md" ]]; then
   echo "[ralph] 提示：未找到 Architecture.md，本轮应从设计阶段重新构建架构文档" >&2
 fi
@@ -165,7 +178,7 @@ while :; do
   send_feishu_status "[ralph] 第 $step 轮开始"
 
   # 为本轮构造编排 Agent 提示词
-  # 使用带引号的 EOF，避免其中的 `design-architect`、`human.md` 等被 Bash 误当作命令执行
+  # 使用带引号的 EOF，避免其中的反引号等被 Bash 误当作命令执行
   PROMPT=$(cat <<'EOF'
 你是 Surf 仓库中的"编排 Agent"（orchestrator）。
 
@@ -173,13 +186,15 @@ while :; do
 - PRD.md：最新需求文档（必需）
 - Architecture.md：最新架构设计与开发 Agent 拆分（如不存在，说明设计阶段尚未完成或需要从头补齐）
 - AGENTS.md：编排/节点协作规则与 Ralph 事件循环说明
+- ralph_state.json：全局状态文件，用于记录当前处于需求/设计/开发/交付的哪一阶段，以及最近一轮 Ralph 的原因说明（详见 AGENTS.md 3.2）。
 
 本次调用是 Ralph 事件循环中的「第 $step 轮」。
 
 请你在**单次调用**内，围绕 Surf 项目推进**一小步、可闭环**的工作，遵守 AGENTS.md 中的状态机与回退规则：
 - 你自己扮演编排 Agent
-- 若当前不存在 Architecture.md，应优先进入「设计阶段」，通过 Task 调用 `design-architect` 子 Agent，在本轮内至少产出一个最小可用的 Architecture.md 初稿（包含核心模块划分和开发 Agent 列表），为后续迭代打基础，而不是跳过设计直接进入开发/交付；
-- 若 Architecture.md 已存在，则根据当前 PRD / Architecture / 代码状态，选择本轮最合适的阶段（需求/设计/开发/交付）
+- 在做任何其他事情之前，先使用 Read 工具读取根目录下的 ralph_state.json，理解当前全局阶段（phase）以及上一次 Ralph 的原因说明；
+- 若当前不存在 Architecture.md，或 ralph_state.json 中的 phase 被标记为 "design" 且 reason 显示需要补充/修正架构，则应优先进入「设计阶段」，通过 Task 调用 design-architect 子 Agent，在本轮内至少产出一个最小可用的 Architecture.md 初稿（包含核心模块划分和开发 Agent 列表），为后续迭代打基础，而不是跳过设计直接进入开发/交付；
+- 若 Architecture.md 已存在，且 ralph_state.json 中的 phase 指向 requirements/development/delivery，则结合当前 PRD / Architecture / 各工作区状态，选择本轮最合适的阶段（需求/设计/开发/交付）
 - 如需要调用节点 Agent（requirements-manager / design-architect / feature-developer / delivery-runner），通过 Task 工具完成
 - 只推进一个清晰的子目标（例如：澄清一个需求点、补全一段设计、实现一个小功能、在交付阶段增加/执行一组测试等）
 - 完成后，在回复中简要说明：你做了什么、更改了哪些文件、还有哪些风险或 TODO

@@ -1,0 +1,9 @@
+{
+  "phase": "development",
+  "iteration": 1,
+  "reason": "Architecture.md 初稿已创建并定义了模块划分与开发 Agent 列表，可以启动开发阶段。",
+  "notes": [
+    "开发 Agent: dev-core-scanner, dev-cli-tui, dev-service-api, dev-macos-gui",
+    "Architecture.md: 覆盖模块职责、接口契约、交付视图"
+  ]
+}
