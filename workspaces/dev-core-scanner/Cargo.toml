@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3.10"

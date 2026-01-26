@@ -176,6 +176,8 @@ struct AtomicCounters {
     top_files: Arc<Mutex<BinaryHeap<Reverse<FileEntry>>>>,
     /// 扩展名统计映射：扩展名 -> (文件数, 总大小)
     extensions: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    /// 陈旧文件列表
+    stale_files: Arc<Mutex<Vec<FileEntry>>>,
 }
 
 impl AtomicCounters {
@@ -187,6 +189,7 @@ impl AtomicCounters {
             limit,
             top_files: Arc::new(Mutex::new(BinaryHeap::with_capacity(limit))),
             extensions: Arc::new(Mutex::new(HashMap::new())),
+            stale_files: Arc::new(Mutex::new(Vec::new())),
         }
     }
     
@@ -251,6 +254,22 @@ impl AtomicCounters {
         vec
     }
 
+    fn add_stale_file(&self, path: PathBuf, size: u64, last_modified: Option<SystemTime>, extension: Option<String>) {
+        let entry = FileEntry {
+            path,
+            size_bytes: size,
+            last_modified,
+            extension,
+        };
+        let mut vec = self.stale_files.lock().unwrap();
+        vec.push(entry);
+    }
+
+    fn stale_files_to_vec(&self) -> Vec<FileEntry> {
+        let vec = self.stale_files.lock().unwrap();
+        vec.clone()
+    }
+
     fn to_summary(&self, root_path: PathBuf, elapsed_seconds: f64) -> ScanSummary {
         ScanSummary {
             root_path,
@@ -297,7 +316,7 @@ impl Scanner {
         
         // 使用线程池执行并行遍历
         pool.scope(|scope| {
-            Self::parallel_walk_dir(scope, request.root_path.clone(), &counters);
+            Self::parallel_walk_dir(scope, request.root_path.clone(), &counters, request);
         });
         
         let elapsed = start_time.elapsed().unwrap_or_default();
@@ -306,7 +325,7 @@ impl Scanner {
             summary: counters.to_summary(request.root_path.clone(), elapsed.as_secs_f64()),
             top_files: counters.top_files_to_vec(),
             by_extension: counters.extensions_to_vec(),
-            stale_files: Vec::new(), // 暂未实现
+            stale_files: counters.stale_files_to_vec(),
         })
     }
     
@@ -338,6 +357,7 @@ impl Scanner {
         scope: &rayon::Scope<'scope>,
         dir: PathBuf,
         counters: &'scope AtomicCounters,
+        request: &'scope ScanRequest,
     ) {
         // 检查是否为目录
         if !dir.is_dir() {
@@ -365,10 +385,18 @@ impl Scanner {
             if path.is_dir() {
                 subdirs.push(path);
             } else {
-                // 增加文件计数和大小
-                counters.files.fetch_add(1, Ordering::SeqCst);
                 let metadata = entry.metadata();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                
+                // 应用 min-size 过滤
+                if let Some(min_size) = request.min_size {
+                    if size < min_size {
+                        continue;
+                    }
+                }
+                
+                // 增加文件计数和大小
+                counters.files.fetch_add(1, Ordering::SeqCst);
                 counters.size.fetch_add(size, Ordering::SeqCst);
                 // 提取扩展名
                 let extension = path
@@ -378,15 +406,27 @@ impl Scanner {
                 counters.add_file_with_extension(extension.clone(), size);
                 // 添加到 Top N 大文件列表
                 let last_modified = metadata.ok().and_then(|m| m.modified().ok());
-                counters.add_file_to_top_list(path, size, last_modified, extension);
+                counters.add_file_to_top_list(path.clone(), size, last_modified, extension.clone());
+                
+                // 检查是否为陈旧文件
+                if let Some(stale_days) = request.stale_days {
+                    if let Some(last_modified) = last_modified {
+                        if let Ok(duration) = SystemTime::now().duration_since(last_modified) {
+                            if duration.as_secs() >= (stale_days as u64) * 24 * 60 * 60 {
+                                counters.add_stale_file(path, size, Some(last_modified), extension);
+                            }
+                        }
+                    }
+                }
             }
         }
         
         // 为每个子目录生成并行任务
         for subdir in subdirs {
             let counters = counters; // 捕获引用
+            let request = request; // 捕获引用
             scope.spawn(move |scope| {
-                Self::parallel_walk_dir(scope, subdir, counters);
+                Self::parallel_walk_dir(scope, subdir, counters, request);
             });
         }
     }

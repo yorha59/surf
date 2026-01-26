@@ -29,6 +29,10 @@ struct Cli {
     #[arg(short, long, default_value = "20", value_name = "N")]
     limit: usize,
     
+    /// 识别陈旧文件的天数阈值（文件最后修改时间超过此天数则视为陈旧）
+    #[arg(long, value_name = "DAYS")]
+    stale_days: Option<u32>,
+    
     /// 启动 JSON-RPC 服务模式
     #[arg(short, long)]
     service: bool,
@@ -99,8 +103,11 @@ impl Cli {
             request.min_size = Some(bytes);
         }
         
-        // 当前版本暂不支持 exclude_patterns 和 stale_days
-        // 后续迭代可添加对应参数
+        if let Some(stale_days) = self.stale_days {
+            request.stale_days = Some(stale_days);
+        }
+        
+        request.limit = Some(self.limit);
         
         Ok(request)
     }

@@ -2,6 +2,36 @@
 
 set -euo pipefail
 
+# 解析命令行参数
+SHOW_HELP=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --help|-h)
+            SHOW_HELP=1
+            ;;
+        *)
+            echo "[ralph] 未知参数: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# 显示帮助信息
+if [[ $SHOW_HELP -eq 1 ]]; then
+    echo "Surf Ralph-loop 编排脚本"
+    echo "用法: ./ralph.sh"
+    echo ""
+    echo "说明:"
+    echo "  本脚本总是在 tmux 会话中执行 coco，便于实时观察执行流程和调试"
+    echo ""
+    echo "环境变量:"
+    echo "  COCO_QUERY_TIMEOUT  设置 coco 查询超时（默认: 10m）"
+    echo "  FEISHU_WEBHOOK    飞书 webhook 地址，用于通知"
+    echo ""
+    exit 0
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
@@ -60,7 +90,79 @@ send_feishu_text() {
 
 # 保留旧命名，向后兼容：状态文本和完整日志都通过同一发送逻辑
 send_feishu_status() {
-  send_feishu_text "$1"
+    send_feishu_text "$1"
+}
+
+# 在 tmux 会话中运行 coco，便于观察执行流程
+run_coco_in_tmux() {
+    local step="$1"
+    local prompt="$2"
+    local session_name="surf-ralph-${step}"
+    
+    # 清理可能存在的旧会话
+    tmux kill-session -t "$session_name" 2>/dev/null || true
+    sleep 1
+    
+    # 创建 tmux 会话，运行 coco 但不传递 prompt
+    tmux new-session -d -s "$session_name" -n "coco" \
+        "coco -y --query-timeout \"${COCO_QUERY_TIMEOUT:-10m}\""
+    
+    # 等待 coco 启动（短暂睡眠）
+    sleep 2
+    
+    # 逐行发送 prompt 内容
+    while IFS= read -r line; do
+        # 使用 -- 分隔选项和内容，避免内容以 - 开头被误解析
+        tmux send-keys -t "$session_name:coco" -- "$line"
+        tmux send-keys -t "$session_name:coco" "Enter"
+    done <<< "$prompt"
+    
+    # 等待 coco 完成（检测 RALPH_DONE 标记）
+    # 解析超时时间（支持 s 和 m 后缀）
+    local timeout_str="${COCO_QUERY_TIMEOUT:-10m}"
+    local timeout_seconds
+    case "$timeout_str" in
+        *s)
+            timeout_seconds="${timeout_str%s}"
+            ;;
+        *m)
+            timeout_seconds="$(( ${timeout_str%m} * 60 ))"
+            ;;
+        *)
+            # 默认按分钟处理
+            timeout_seconds="$(( ${timeout_str%m} * 60 ))"
+            ;;
+    esac
+    # 增加一些缓冲时间
+    timeout_seconds=$(( timeout_seconds + 30 ))
+    local start_time=$(date +%s)
+    
+    # 捕获输出并检测完成标记
+    local output=""
+    local done_found=0
+    while (( $(date +%s) - start_time < timeout_seconds )); do
+        # 捕获当前窗格内容
+        local current_output=$(tmux capture-pane -t "$session_name:coco" -p 2>/dev/null || echo "")
+        if [[ -n "$current_output" ]]; then
+            output="$current_output"
+            # 检查是否包含完成标记
+            if echo "$output" | grep -q "RALPH_DONE="; then
+                done_found=1
+                break
+            fi
+        fi
+        sleep 2
+    done
+    
+    # 输出结果
+    if [[ -n "$output" ]]; then
+        echo "$output"
+    else
+        echo "无输出"
+    fi
+    
+    # 清理
+    tmux kill-session -t "$session_name" 2>/dev/null || true
 }
 
 ralph_git_guard_with_coco() {
@@ -236,11 +338,12 @@ EOF
   # 使用 -y 自动允许工具调用，避免交互式确认导致脚本卡住
   # 使用 --query-timeout 限制单轮查询时间，默认 10 分钟，可通过 COCO_QUERY_TIMEOUT 环境变量覆写
   # 通过 tee 让用户实时看到编排者输出，同时保存在临时文件中供后续解析
-  echo "[ralph] 调用 coco 执行第 $step 轮编排..." >&2
+  echo "[ralph] 调用 coco 执行第 ${step} 轮编排..." >&2
   TMPFILE="$(mktemp -t surf-ralph-XXXXXX)"
 
   set +e
-  coco -y --query-timeout "${COCO_QUERY_TIMEOUT:-10m}" -p "$PROMPT" | tee "$TMPFILE"
+  echo "[ralph] 在 tmux 中执行（会话名: surf-ralph-${step}）" >&2
+  run_coco_in_tmux "$step" "$PROMPT" | tee "$TMPFILE"
   COCO_EXIT=$?
   set -e
 
