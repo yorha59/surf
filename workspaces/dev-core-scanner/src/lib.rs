@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use rayon;
 /// 扫描请求参数
 #[derive(Debug, Clone)]
 pub struct ScanRequest {
@@ -132,6 +134,33 @@ struct ScanCollector {
     /// 当前时间，用于陈旧文件判断
     now: SystemTime,
 }
+
+/// 用于并行扫描的原子计数器
+struct AtomicCounters {
+    files: AtomicU64,
+    dirs: AtomicU64,
+    size: AtomicU64,
+}
+
+impl AtomicCounters {
+    fn new() -> Self {
+        Self {
+            files: AtomicU64::new(0),
+            dirs: AtomicU64::new(0),
+            size: AtomicU64::new(0),
+        }
+    }
+    
+    fn to_summary(&self, root_path: PathBuf, elapsed_seconds: f64) -> ScanSummary {
+        ScanSummary {
+            root_path,
+            total_files: self.files.load(Ordering::SeqCst),
+            total_dirs: self.dirs.load(Ordering::SeqCst),
+            total_size_bytes: self.size.load(Ordering::SeqCst),
+            elapsed_seconds,
+        }
+    }
+}
 /// 核心扫描引擎
 pub struct Scanner;
 
@@ -147,23 +176,33 @@ impl Scanner {
     /// 后续迭代会添加多线程、文件类型分析、Top N 文件等功能。
     pub fn scan_sync(&self, request: &ScanRequest) -> std::io::Result<ScanResult> {
         let start_time = SystemTime::now();
-        let mut total_files = 0;
-        let mut total_dirs = 0;
-        let mut total_size = 0;
         
-        // 简单的递归遍历（后续会改为多线程）
-        Self::walk_dir(&request.root_path, &mut total_files, &mut total_dirs, &mut total_size)?;
+        // 验证根目录存在且可访问
+        if !request.root_path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("根目录不存在: {}", request.root_path.display()),
+            ));
+        }
+        
+        // 配置 rayon 线程池
+        let threads = request.threads.unwrap_or(0); // 0 表示使用默认值
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(if threads > 0 { threads as usize } else { rayon::current_num_threads() })
+            .build()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        
+        let counters = AtomicCounters::new();
+        
+        // 使用线程池执行并行遍历
+        pool.scope(|scope| {
+            Self::parallel_walk_dir(scope, request.root_path.clone(), &counters);
+        });
         
         let elapsed = start_time.elapsed().unwrap_or_default();
         
         Ok(ScanResult {
-            summary: ScanSummary {
-                root_path: request.root_path.clone(),
-                total_files,
-                total_dirs,
-                total_size_bytes: total_size,
-                elapsed_seconds: elapsed.as_secs_f64(),
-            },
+            summary: counters.to_summary(request.root_path.clone(), elapsed.as_secs_f64()),
             top_files: Vec::new(), // 暂未实现
             by_extension: Vec::new(), // 暂未实现
             stale_files: Vec::new(), // 暂未实现
@@ -191,6 +230,54 @@ impl Scanner {
             }
         }
         Ok(())
+    }
+    
+    /// 并行遍历目录树（内部实现）
+    fn parallel_walk_dir<'scope>(
+        scope: &rayon::Scope<'scope>,
+        dir: PathBuf,
+        counters: &'scope AtomicCounters,
+    ) {
+        // 检查是否为目录
+        if !dir.is_dir() {
+            return;
+        }
+        
+        // 增加目录计数
+        counters.dirs.fetch_add(1, Ordering::SeqCst);
+        
+        // 读取目录条目，如果失败则跳过（无法访问的目录）
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        
+        // 收集子目录和文件
+        let mut subdirs = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            
+            if path.is_dir() {
+                subdirs.push(path);
+            } else {
+                // 增加文件计数和大小
+                counters.files.fetch_add(1, Ordering::SeqCst);
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                counters.size.fetch_add(size, Ordering::SeqCst);
+            }
+        }
+        
+        // 为每个子目录生成并行任务
+        for subdir in subdirs {
+            let counters = counters; // 捕获引用
+            scope.spawn(move |scope| {
+                Self::parallel_walk_dir(scope, subdir, counters);
+            });
+        }
     }
 }
 
@@ -262,5 +349,66 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = scan_path(dir.path()).unwrap();
         assert_eq!(result.summary.total_files, 0);
+    }
+    
+    #[test]
+    fn test_scan_sync_multithreaded() {
+        // 创建一个包含多个文件和子目录的测试目录树
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        
+        // 创建一些文件
+        for i in 0..10 {
+            let file_path = root.join(format!("file{}.txt", i));
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(format!("Content {}", i).as_bytes()).unwrap();
+        }
+        
+        // 创建一些子目录
+        for i in 0..5 {
+            let subdir = root.join(format!("dir{}", i));
+            fs::create_dir(&subdir).unwrap();
+            
+            // 在子目录中创建文件
+            for j in 0..3 {
+                let file_path = subdir.join(format!("subfile{}.txt", j));
+                let mut file = File::create(&file_path).unwrap();
+                file.write_all(format!("Sub content {}-{}", i, j).as_bytes()).unwrap();
+            }
+        }
+        
+        // 使用单线程扫描（threads = 1）作为基准
+        let mut request1 = ScanRequest::new(root);
+        request1.threads = Some(1);
+        let scanner = Scanner::new();
+        let result1 = scanner.scan_sync(&request1).unwrap();
+        
+        // 使用多线程扫描（默认线程数）
+        let mut request2 = ScanRequest::new(root);
+        request2.threads = None; // 使用默认（逻辑核心数）
+        let result2 = scanner.scan_sync(&request2).unwrap();
+        
+        // 使用明确指定线程数（例如 2）
+        let mut request3 = ScanRequest::new(root);
+        request3.threads = Some(2);
+        let result3 = scanner.scan_sync(&request3).unwrap();
+        
+        // 验证所有扫描结果的总计一致
+        assert_eq!(result1.summary.total_files, result2.summary.total_files);
+        assert_eq!(result1.summary.total_dirs, result2.summary.total_dirs);
+        assert_eq!(result1.summary.total_size_bytes, result2.summary.total_size_bytes);
+        
+        assert_eq!(result1.summary.total_files, result3.summary.total_files);
+        assert_eq!(result1.summary.total_dirs, result3.summary.total_dirs);
+        assert_eq!(result1.summary.total_size_bytes, result3.summary.total_size_bytes);
+        
+        // 验证具体数值（根据创建的文件和目录）
+        // 总文件数：10个根目录文件 + 5个子目录 * 3个文件 = 25
+        // 总目录数：根目录 + 5个子目录 = 6
+        assert_eq!(result1.summary.total_files, 25);
+        assert_eq!(result1.summary.total_dirs, 6);
+        
+        // 文件大小：每个文件内容长度不同，但我们可以验证总大小 > 0
+        assert!(result1.summary.total_size_bytes > 0);
     }
 }
