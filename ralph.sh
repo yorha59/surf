@@ -5,9 +5,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-if [[ ! -f "PRD.md" || ! -f "Architecture.md" || ! -f "AGENTS.md" ]]; then
-  echo "[ralph] 必须在 Surf 仓库根目录运行，并且需要 PRD.md / Architecture.md / AGENTS.md" >&2
+if [[ ! -f "PRD.md" || ! -f "AGENTS.md" ]]; then
+  echo "[ralph] 必须在 Surf 仓库根目录运行，并且需要 PRD.md / AGENTS.md" >&2
   exit 1
+fi
+
+if [[ ! -f "Architecture.md" ]]; then
+  echo "[ralph] 提示：未找到 Architecture.md，本轮应从设计阶段重新构建架构文档" >&2
 fi
 
 echo "[ralph] Surf Ralph-loop 启动，无最大迭代次数限制（需手动停止或任务完成）" >&2
@@ -161,29 +165,31 @@ while :; do
   send_feishu_status "[ralph] 第 $step 轮开始"
 
   # 为本轮构造编排 Agent 提示词
-  PROMPT=$(cat <<EOF
-你是 Surf 仓库中的“编排 Agent”（orchestrator）。
+  # 使用带引号的 EOF，避免其中的 `design-architect`、`human.md` 等被 Bash 误当作命令执行
+  PROMPT=$(cat <<'EOF'
+你是 Surf 仓库中的"编排 Agent"（orchestrator）。
 
-当前仓库根目录包含以下关键文件：
-- PRD.md：最新需求文档
-- Architecture.md：最新架构设计与开发 Agent 拆分
+当前仓库根目录包含以下关键文件（其中部分在当前轮次可能尚未存在）：
+- PRD.md：最新需求文档（必需）
+- Architecture.md：最新架构设计与开发 Agent 拆分（如不存在，说明设计阶段尚未完成或需要从头补齐）
 - AGENTS.md：编排/节点协作规则与 Ralph 事件循环说明
 
 本次调用是 Ralph 事件循环中的「第 $step 轮」。
 
 请你在**单次调用**内，围绕 Surf 项目推进**一小步、可闭环**的工作，遵守 AGENTS.md 中的状态机与回退规则：
 - 你自己扮演编排 Agent
-- 根据当前 PRD / Architecture / 代码状态，选择本轮最合适的阶段（需求/设计/开发/交付）
+- 若当前不存在 Architecture.md，应优先进入「设计阶段」，通过 Task 调用 `design-architect` 子 Agent，在本轮内至少产出一个最小可用的 Architecture.md 初稿（包含核心模块划分和开发 Agent 列表），为后续迭代打基础，而不是跳过设计直接进入开发/交付；
+- 若 Architecture.md 已存在，则根据当前 PRD / Architecture / 代码状态，选择本轮最合适的阶段（需求/设计/开发/交付）
 - 如需要调用节点 Agent（requirements-manager / design-architect / feature-developer / delivery-runner），通过 Task 工具完成
 - 只推进一个清晰的子目标（例如：澄清一个需求点、补全一段设计、实现一个小功能、在交付阶段增加/执行一组测试等）
 - 完成后，在回复中简要说明：你做了什么、更改了哪些文件、还有哪些风险或 TODO
 
 重要：
 - 不要尝试等待命令行里的「人工即时回答」；你无法在本次调用中与用户进行交互式问答。
-- 如需「PRD 确认」「架构确认」这类交互，请：
-  - 直接在 PRD.md / Architecture.md 中补充建议、问题列表或 TODO；或
-  - 在你的回复中明确写出「人类下一步需要执行的动作」（例如需要用户在线确认的点）。
-  所有这些信息会在下一轮 Ralph 调用时，通过仓库文件再次被你读到。
+- 如需「PRD 确认」「架构确认」或其它需要人类决策/操作的交互，请：
+  - 将问题汇总写入根目录的 `human.md` 中（遵循 AGENTS.md 和 human.md 中的格式与约定），包括：报告问题的 Agent 或模块、问题发生的目录/工作区、问题描述和建议的人类动作；
+  - 在你的回复中简要提示本轮新增了哪些人类待办事项，方便外部查看。
+  所有这些信息会在下一轮 Ralph 调用时，通过 `human.md` 再次被你读到，并在下一轮优先处理。
 
 特别要求（供 Ralph-loop 脚本解析）：
 - 请在思考与说明的最后，单独输出一行：
@@ -197,6 +203,15 @@ while :; do
   请在 RALPH_DONE 行之后再单独输出一行：
   HUMAN_REQUIRED=<true|false>
   当你希望外部 Ralph 循环在本轮结束后暂停，等待人类处理这些事项时，请输出 HUMAN_REQUIRED=true。
+- 请在 HUMAN_REQUIRED 行之后再单独输出一行：
+  AGENTS_USED=<逗号分隔的 agent 名称>
+  其中必须包含 orchestrator（表示你自己作为主编排 Agent），
+  若本轮通过 Task 调用了节点 Agent，请按实际情况追加节点类型名称，例如：
+    AGENTS_USED=orchestrator,requirements-manager
+    AGENTS_USED=orchestrator,design-architect,feature-developer
+    AGENTS_USED=orchestrator,feature-developer,delivery-runner
+  若本轮未调用任何节点 Agent，仅输出：
+    AGENTS_USED=orchestrator
 
 请现在开始本轮工作，并遵守以上输出约定。
 EOF
@@ -230,6 +245,14 @@ EOF
 
   done_flag="false"
   human_flag="false"
+  agents="orchestrator"
+
+  # 提取本轮使用的 Agent 列表（如果 Coco 遵循了 AGENTS_USED 约定）
+  if agent_line=$(echo "$RESPONSE" | grep -E "AGENTS_USED=" | tail -n1); then
+    agents="${agent_line#AGENTS_USED=}"
+  fi
+
+  echo "[ralph] 第 $step 轮 Agent: $agents" >&2
 
   if echo "$RESPONSE" | grep -q "RALPH_DONE=true"; then
     done_flag="true"
@@ -257,7 +280,7 @@ EOF
 
 $RESPONSE
 
-[ralph] 第 $step 轮结束: RALPH_DONE=${done_flag}, HUMAN_REQUIRED=${human_flag}
+[ralph] 第 $step 轮结束: RALPH_DONE=${done_flag}, HUMAN_REQUIRED=${human_flag}, AGENTS_USED=${agents}
 EOF
 )
     send_feishu_text "$full_round_msg"
