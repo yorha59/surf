@@ -1,9 +1,6 @@
 {
-  "phase": "design",
-  "iteration": 2,
-  "reason": "human.md 中存在删除操作统一策略问题需要设计确认，回退到设计阶段。",
-  "notes": [
-    "待处理问题：删除操作跨平台跨形态统一策略",
-    "相关文件：human.md, Architecture.md"
-  ]
+  "phase": "development",
+  "iteration": 3,
+  "reason": "设计已确认，删除策略已明确，TUI 不支持删除功能，推进到开发阶段。",
+  "notes": []
 }
