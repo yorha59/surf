@@ -151,10 +151,14 @@
 - 为了让人类参与点清晰、可执行，Surf 仓库根目录下提供 `human.md` 作为**唯一的人类待办清单**：
   - 人类默认**不直接修改 `PRD.md` / `Architecture.md` 等规范文档**，而是只在 `human.md` 中对问题给出决策（例如在某条问题下追加一行 `人类决策: ...`）；
   - PRD/Architecture 只记录稳定的需求与设计决策，不再扩充临时 TODO 或「待人类确认」问题列表；
-  - 任一节点 Agent（包括 orchestrator 自身）在某一轮 Ralph 调用中，**只能抛出与自己当前工作内容直接相关的问题**，并写入 `human.md`；每条问题记录中必须包含「报告 Agent」字段，以指明是哪个节点发现的问题；
+  - **向上反馈原则**：只有 `design-architect`（架构师）和 `requirements-manager`（设计师）可以直接反馈需要人类决策的问题到 `human.md`；其他 Agent 必须遵循向上反馈链条：
+    - 交付节点（`delivery-runner`）发现问题 → 反馈给研发 Agent（`feature-developer`）
+    - 研发 Agent（`feature-developer`）发现问题 → 反馈给架构 Agent（`design-architect`）
+    - 架构 Agent（`design-architect`）判断：如果是产品设计问题 → 反馈给设计师 Agent（`requirements-manager`）
+    - 设计师 Agent（`requirements-manager`）判断：如果确实需要用户协作（如无网络、环境问题等）→ 写入 `human.md`
   - 当 `human.md` 非空时，下一轮 Ralph 调用 Coco 时应优先围绕这些问题工作：
     - 解析每条问题中的 `报告 Agent` 与 `人类决策` 内容；
-    - 将问题交还给同一个「报告 Agent」来处理：例如 `requirements-manager` 抛出的问题，后续仍由 `requirements-manager` 更新 `PRD.md`；`design-architect` 抛出的问题，后续仍由其更新 `Architecture.md`；某个 `feature-developer` 抛出的实现问题，则由对应开发 Agent 在自己的工作区完成修改与自测；交付相关问题由 `delivery-runner` 在交付工作区处理；
+    - 将问题交还给同一个「报告 Agent」来处理：例如 `requirements-manager` 抛出的问题，后续仍由 `requirements-manager` 更新 `PRD.md`；`design-architect` 抛出的问题，后续仍由其更新 `Architecture.md`；
     - 若这些问题意味着需要从当前阶段回退（例如设计问题导致从开发/交付回退到设计），则编排 Agent 需按照第 2 节状态机规则进行阶段回退，并调度对应「报告 Agent」执行修正；
     - 在本轮回复中说明对每条问题的处理结果和后续状态。
 - 当 Coco 认为 `human.md` 中所有问题都已经按人类决策处理完，且当前轮不再需要额外人类动作时，应当：

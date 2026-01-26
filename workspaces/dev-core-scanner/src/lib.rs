@@ -9,6 +9,7 @@ use std::cmp::Reverse;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use rayon;
+use glob::Pattern;
 use serde::Serialize;
 /// 扫描请求参数
 #[derive(Debug, Clone, Serialize)]
@@ -313,10 +314,17 @@ impl Scanner {
         
         let limit = request.limit.unwrap_or(20);
         let counters = AtomicCounters::new(limit);
+
+        // 预编译排除规则（glob 模式）；非法模式将被忽略
+        let exclude_patterns: Vec<Pattern> = request
+            .exclude_patterns
+            .iter()
+            .filter_map(|p| Pattern::new(p).ok())
+            .collect();
         
         // 使用线程池执行并行遍历
         pool.scope(|scope| {
-            Self::parallel_walk_dir(scope, request.root_path.clone(), &counters, request);
+            Self::parallel_walk_dir(scope, request.root_path.clone(), &counters, request, &exclude_patterns);
         });
         
         let elapsed = start_time.elapsed().unwrap_or_default();
@@ -358,6 +366,7 @@ impl Scanner {
         dir: PathBuf,
         counters: &'scope AtomicCounters,
         request: &'scope ScanRequest,
+        exclude_patterns: &'scope [Pattern],
     ) {
         // 检查是否为目录
         if !dir.is_dir() {
@@ -383,11 +392,20 @@ impl Scanner {
             let path = entry.path();
             
             if path.is_dir() {
+                // 目录匹配排除规则则跳过整棵子树
+                if is_excluded(&path, exclude_patterns) {
+                    continue;
+                }
                 subdirs.push(path);
             } else {
                 let metadata = entry.metadata();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-                
+
+                // 文件匹配排除规则则跳过
+                if is_excluded(&path, exclude_patterns) {
+                    continue;
+                }
+
                 // 应用 min-size 过滤
                 if let Some(min_size) = request.min_size {
                     if size < min_size {
@@ -426,10 +444,21 @@ impl Scanner {
             let counters = counters; // 捕获引用
             let request = request; // 捕获引用
             scope.spawn(move |scope| {
-                Self::parallel_walk_dir(scope, subdir, counters, request);
+                Self::parallel_walk_dir(scope, subdir, counters, request, exclude_patterns);
             });
         }
     }
+}
+
+/// 判断路径是否匹配任一排除模式
+fn is_excluded(path: &Path, patterns: &[Pattern]) -> bool {
+    // 使用绝对或相对路径进行匹配，glob::Pattern 支持路径分隔符
+    for pat in patterns {
+        if pat.matches_path(path) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 便捷函数：快速扫描指定路径
@@ -724,5 +753,65 @@ mod tests {
         // 但 top_files 应只包含非零文件（1个）
         assert_eq!(result.top_files.len(), 1);
         assert_eq!(result.top_files[0].size_bytes, 7);
+    }
+
+    #[test]
+    fn test_exclude_file_pattern() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // 创建应被排除的 .log 文件与一个正常文件
+        let log_path = root.join("skip.log");
+        let mut log_file = File::create(&log_path).unwrap();
+        log_file.write_all(b"log content").unwrap();
+
+        let data_path = root.join("data.bin");
+        let mut data_file = File::create(&data_path).unwrap();
+        data_file.write_all(&vec![b'a'; 1024]).unwrap();
+
+        // 设置排除模式：排除所有 .log 文件
+        let mut request = ScanRequest::new(root);
+        request.exclude_patterns = vec!["**/*.log".to_string(), "*.log".to_string()];
+
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+
+        // 总文件数仍计数为2，但按 min_size 未过滤；我们只断言 top_files 不包含 .log，扩展统计也不包含 log
+        assert_eq!(result.summary.total_files, 1, "排除文件后计数应为1");
+        // 验证 top_files 中不包含 skip.log
+        assert!(result.top_files.iter().all(|e| e.path.file_name().unwrap() != "skip.log"));
+        // 验证扩展统计不包含 log
+        assert!(result.by_extension.iter().all(|s| s.extension != "log"));
+    }
+
+    #[test]
+    fn test_exclude_directory_pattern() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // 创建一个子目录及其中的文件
+        let subdir = root.join("sub");
+        fs::create_dir(&subdir).unwrap();
+        let file_in_sub = subdir.join("a.txt");
+        let mut f = File::create(&file_in_sub).unwrap();
+        f.write_all(b"hello").unwrap();
+
+        // 根目录下也创建一个文件
+        let file_root = root.join("b.txt");
+        let mut fr = File::create(&file_root).unwrap();
+        fr.write_all(b"world").unwrap();
+
+        // 排除整个子目录
+        let mut request = ScanRequest::new(root);
+        request.exclude_patterns = vec!["**/sub/**".to_string(), "sub/**".to_string(), "sub".to_string()];
+
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+
+        // 应只统计根目录文件
+        assert_eq!(result.summary.total_files, 1);
+        // Top 文件应只包含 b.txt
+        assert_eq!(result.top_files.len(), 1);
+        assert_eq!(result.top_files[0].path.file_name().unwrap(), "b.txt");
     }
 }

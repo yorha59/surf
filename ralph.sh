@@ -153,45 +153,29 @@ run_coco_in_tmux() {
     tmux send-keys -t "$session_name:coco" "Enter"
     
     # 等待 coco 完成（检测 RALPH_DONE 标记）
-    # 解析超时时间（支持 s 和 m 后缀）
-    local timeout_str="${COCO_QUERY_TIMEOUT:-10m}"
-    local timeout_seconds
-    case "$timeout_str" in
-        *s)
-            timeout_seconds="${timeout_str%s}"
-            ;;
-        *m)
-            timeout_seconds="$(( ${timeout_str%m} * 60 ))"
-            ;;
-        *)
-            # 默认按分钟处理
-            timeout_seconds="$(( ${timeout_str%m} * 60 ))"
-            ;;
-    esac
-    # 增加一些缓冲时间
-    timeout_seconds=$(( timeout_seconds + 30 ))
-    
-    echo "[ralph] 等待coco执行完成，超时: ${timeout_seconds}秒..." >&2
+    echo "[ralph] 等待coco执行完成（无超时限制）..." >&2
     
     # 等待一小段时间，确保prompt开始处理
     sleep 3
     
-    local start_time=$(date +%s)
     local output=""
-    local done_found=0
-    local no_output_count=0
-    local max_no_output=10  # 最多10次无输出检查（约20秒）
-    while (( $(date +%s) - start_time < timeout_seconds )); do
+    while true; do
+        # 检查tmux窗格是否已死（进程已退出）
+        local pane_dead=$(tmux list-panes -t "$session_name:coco" -F "#{pane_dead}" 2>/dev/null || echo "1")
+        if [[ "$pane_dead" == "1" ]]; then
+            echo "[ralph] 检测到tmux窗格进程已退出" >&2
+            # 即使没有RALPH_DONE标记，也退出等待
+            break
+        fi
+        
         # 捕获整个窗格历史（从开头到现在）
         local current_output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
         
         if [[ -n "$current_output" ]]; then
             output="$current_output"
-            no_output_count=0
             
-            # 检查是否包含完成标记
-            if echo "$output" | grep -q "RALPH_DONE="; then
-                done_found=1
+            # 检查是否包含完成标记（允许前后空格和等号前后空格，精确匹配）
+            if echo "$output" | grep -E -q "^[[:space:]]*RALPH_DONE[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$"; then
                 echo "[ralph] 检测到 RALPH_DONE 标记" >&2
                 # 再等待2秒，确保所有输出都被捕获
                 sleep 2
@@ -200,32 +184,16 @@ run_coco_in_tmux() {
                 break
             fi
             
-            # 检查coco是否已返回交互模式
-            if echo "$output" | grep -q "\$ shell mode\|command mode\|⏵⏵ accept all tools"; then
-                echo "[ralph] coco 已返回交互模式，可能执行完成" >&2
-                done_found=1
-                # 等待1秒后最后捕获一次
-                sleep 1
-                output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
-                break
-            fi
-        else
-            # 无输出计数
-            ((no_output_count++))
-            if (( no_output_count > max_no_output )); then
-                echo "[ralph] 警告：连续 ${max_no_output} 次未捕获到输出，可能coco已退出" >&2
-                break
-            fi
+            # 清除屏幕，避免重复显示
+            clear >&2
+            # 显示当前窗格内容
+            echo "[ralph] tmux 窗格实时输出：" >&2
+            echo "$output" >&2
         fi
         
         sleep 2
     done
     
-    if (( done_found == 0 )); then
-        echo "[ralph] 警告：等待coco执行超时" >&2
-        # 超时前最后捕获一次
-        output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
-    fi
     
     # 输出结果
     if [[ -n "$output" ]]; then
@@ -237,26 +205,31 @@ run_coco_in_tmux() {
     # 解析 flag 并写入文件（如果提供了 flag_file 参数）
     local flag_file="${3:-}"
     if [[ -n "$flag_file" ]]; then
-        # 提取 RALPH_DONE 值
+        # 提取 RALPH_DONE 值（精确匹配整行，允许前后空格和等号前后空格）
         local ralph_done="false"
-        if echo "$output" | grep -q "^RALPH_DONE=true$" || echo "$output" | grep -q "RALPH_DONE=true[^<]"; then
+        if echo "$output" | grep -E -q "^[[:space:]]*RALPH_DONE[[:space:]]*=[[:space:]]*true[[:space:]]*$"; then
             ralph_done="true"
-        elif echo "$output" | grep -q "^RALPH_DONE=false$" || echo "$output" | grep -q "RALPH_DONE=false[^<]"; then
+        elif echo "$output" | grep -E -q "^[[:space:]]*RALPH_DONE[[:space:]]*=[[:space:]]*false[[:space:]]*$"; then
             ralph_done="false"
         fi
         
-        # 提取 HUMAN_REQUIRED 值
+        # 提取 HUMAN_REQUIRED 值（精确匹配整行，允许前后空格和等号前后空格）
         local human_required="false"
-        if echo "$output" | grep -q "^HUMAN_REQUIRED=true$" || echo "$output" | grep -q "HUMAN_REQUIRED=true[^<]"; then
+        if echo "$output" | grep -E -q "^[[:space:]]*HUMAN_REQUIRED[[:space:]]*=[[:space:]]*true[[:space:]]*$"; then
             human_required="true"
-        elif echo "$output" | grep -q "^HUMAN_REQUIRED=false$" || echo "$output" | grep -q "HUMAN_REQUIRED=false[^<]"; then
+        elif echo "$output" | grep -E -q "^[[:space:]]*HUMAN_REQUIRED[[:space:]]*=[[:space:]]*false[[:space:]]*$"; then
             human_required="false"
         fi
         
-        # 提取 AGENTS_USED 值
+        # 提取 AGENTS_USED 值（匹配行首，允许等号前后空格，取最后一行）
         local agents_used="orchestrator"
-        if agent_line=$(echo "$output" | grep -E "AGENTS_USED=" | tail -n1); then
-            agents_used="${agent_line#AGENTS_USED=}"
+        if agent_line=$(echo "$output" | grep -E "^[[:space:]]*AGENTS_USED[[:space:]]*=" | tail -n1); then
+            # 移除行首空格和AGENTS_USED=前缀（注意等号前后可能有空格）
+            # 先找到等号的位置
+            local prefix="${agent_line%%=*}"
+            # 移除前缀和等号
+            agents_used="${agent_line#*=}"
+            agents_used="${agents_used#"${agents_used%%[![:space:]]*}"}"  # 去除前导空格
         fi
         
         # 写入 flag 文件
@@ -399,28 +372,40 @@ while :; do
 
 本次调用是 Ralph 事件循环中的「第 $step 轮」。
 
-请你在**单次调用**内，围绕 Surf 项目推进**一小步、可闭环**的工作，遵守 AGENTS.md 中的状态机与回退规则：
-- 你自己扮演编排 Agent
-- 在做任何其他事情之前，先使用 Read 工具读取根目录下的 ralph_state.json，理解当前全局阶段（phase）以及上一次 Ralph 的原因说明；
-- 若当前不存在 Architecture.md，或 ralph_state.json 中的 phase 被标记为 "design" 且 reason 显示需要补充/修正架构，则应优先进入「设计阶段」，通过 Task 调用 design-architect 子 Agent，在本轮内至少产出一个最小可用的 Architecture.md 初稿（包含核心模块划分和开发 Agent 列表），为后续迭代打基础，而不是跳过设计直接进入开发/交付；
-- 若 Architecture.md 已存在，且 ralph_state.json 中的 phase 指向 requirements/development/delivery，则结合当前 PRD / Architecture / 各工作区状态，选择本轮最合适的阶段（需求/设计/开发/交付）
-- 如需要调用节点 Agent（requirements-manager / design-architect / feature-developer / delivery-runner），通过 Task 工具完成
-- 只推进一个清晰的子目标（例如：澄清一个需求点、补全一段设计、实现一个小功能、在交付阶段增加/执行一组测试等）
-- 完成后，在回复中简要说明：你做了什么、更改了哪些文件、还有哪些风险或 TODO
+**编排 Agent 核心职责**：
+- 作为主编排者，你**只负责协调调度和状态机流转**，不执行任何具体的代码更新、构建、测试或文档编辑工作
+- 所有具体工作必须通过 Task 工具调用相应的节点 Agent 完成
+- 你的主要工作是：读取全局状态 → 判断当前阶段 → 调用相应节点 Agent → 更新全局状态
 
-重要：
-- 不要尝试等待命令行里的「人工即时回答」；你无法在本次调用中与用户进行交互式问答。
-- 如需「PRD 确认」「架构确认」或其它需要人类决策/操作的交互，请：
-  - 将问题汇总写入根目录的 `human.md` 中（遵循 AGENTS.md 和 human.md 中的格式与约定），包括：报告问题的 Agent 或模块、问题发生的目录/工作区、问题描述和建议的人类动作；
-  - 在你的回复中简要提示本轮新增了哪些人类待办事项，方便外部查看。
-  所有这些信息会在下一轮 Ralph 调用时，通过 `human.md` 再次被你读到，并在下一轮优先处理。
+**工作流程**：
+1. **首先读取全局状态**：使用 Read 工具读取根目录下的 `ralph_state.json`，理解当前全局阶段（phase）以及上一次 Ralph 的原因说明
+2. **状态机决策**：
+   - 若当前不存在 `Architecture.md`，或 `ralph_state.json` 中的 phase 被标记为 "design" 且 reason 显示需要补充/修正架构，则应优先进入「设计阶段」，通过 Task 调用 `design-architect` 子 Agent
+   - 若 `Architecture.md` 已存在，结合当前 PRD / Architecture / 各工作区状态，选择本轮最合适的阶段（需求/设计/开发/交付）
+3. **调用节点 Agent**：
+   - 需求阶段：调用 `requirements-manager`
+   - 设计阶段：调用 `design-architect`
+   - 开发阶段：根据 `Architecture.md` 中的开发 Agent 列表，并行调用相应的 `feature-developer`
+   - 交付阶段：调用 `delivery-runner`
+4. **向上反馈原则**：
+   - 交付节点发现问题 → 反馈给研发 Agent（feature-developer）
+   - 研发 Agent 发现问题 → 反馈给架构 Agent（design-architect）
+   - 架构 Agent 判断：如果是产品设计问题 → 反馈给设计师 Agent（requirements-manager）
+   - 设计师 Agent 判断：如果确实需要用户协作（如无网络、环境问题等）→ 写入 `human.md`
+   - **重要**：只有架构师和设计师才能判断是否需要用户协助，其他 Agent 必须遵循向上反馈原则
 
-特别要求（供 Ralph-loop 脚本解析）：
+**重要规则**：
+- **禁止编排者直接工作**：你不得执行任何代码更新、测试、构建或文档编辑工作，所有具体工作必须通过 Task 调用节点 Agent 完成
+- **人类待办问题限制**：只有 `design-architect`（架构师）和 `requirements-manager`（设计师）可以反馈需要人类决策的问题到 `human.md`
+- **向上反馈链条**：交付 → 研发 → 架构 → 设计师 → 用户（如必要）
+- **单步推进**：每轮只推进一个清晰的子目标，例如：调用一个节点 Agent 完成其阶段内的一小步工作
+- **状态更新**：在本轮结束时，使用 ApplyPatch 工具更新 `ralph_state.json` 中的 phase / iteration / reason / notes
+
+**输出约定**：
 - 请在思考与说明的最后，单独输出一行：
   RALPH_DONE=<true|false>
 - 当你认为：
-  - 当前 PRD 范围内的所有 story/功能点
-  - 已经完成「需求 → 设计 → 开发 → 交付（含独立测试）」完整闭环
+  - 当前 PRD 范围内的所有 story/功能点已经完成「需求 → 设计 → 开发 → 交付（含独立测试）」完整闭环
   - 或本轮已无有意义的下一步可执行工作
   时，请输出 RALPH_DONE=true；否则输出 RALPH_DONE=false。
 - 如果你认为本轮产生了需要人类显式决策或修改文档的内容（例如 PRD 或 Architecture 中存在待确认问题），
@@ -437,7 +422,7 @@ while :; do
   若本轮未调用任何节点 Agent，仅输出：
     AGENTS_USED=orchestrator
 
-请现在开始本轮工作，并遵守以上输出约定。
+请现在开始本轮工作，严格遵守以上编排规则。
 EOF
 )
 

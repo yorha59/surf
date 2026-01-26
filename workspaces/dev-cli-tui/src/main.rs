@@ -32,6 +32,10 @@ struct Cli {
     /// 识别陈旧文件的天数阈值（文件最后修改时间超过此天数则视为陈旧）
     #[arg(long, value_name = "DAYS")]
     stale_days: Option<u32>,
+
+    /// 排除规则（glob 模式，可重复传入多次，例如：--exclude "**/*.log" --exclude "node_modules/**"）
+    #[arg(long, value_name = "GLOB", num_args = 1.., action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
     
     /// 启动 JSON-RPC 服务模式
     #[arg(short, long)]
@@ -106,9 +110,14 @@ impl Cli {
         if let Some(stale_days) = self.stale_days {
             request.stale_days = Some(stale_days);
         }
-        
+
         request.limit = Some(self.limit);
-        
+
+        // 传递排除规则（glob）到核心扫描请求
+        if !self.exclude.is_empty() {
+            request.exclude_patterns = self.exclude.clone();
+        }
+
         Ok(request)
     }
 }
@@ -713,6 +722,8 @@ mod tests {
             "--min-size", "10KB",
             "--limit", "10",
             "--stale-days", "7",
+            "--exclude", "**/*.log",
+            "--exclude", "node_modules/**",
             "--host", "0.0.0.0",
             "--port", "4321",
             "--json",
@@ -723,6 +734,7 @@ mod tests {
         assert_eq!(cli.min_size.as_deref(), Some("10KB"));
         assert_eq!(cli.limit, 10);
         assert_eq!(cli.stale_days, Some(7));
+        assert_eq!(cli.exclude, vec!["**/*.log".to_string(), "node_modules/**".to_string()]);
         assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, 4321);
         assert!(cli.json);
@@ -743,6 +755,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             json: false,
             tui: false,
+            exclude: vec!["**/*.log".to_string(), "tmp/**".to_string()],
         };
         let req = cli.to_scan_request().expect("转换 ScanRequest 失败");
         assert_eq!(req.root_path, PathBuf::from("."));
@@ -750,6 +763,7 @@ mod tests {
         assert_eq!(req.min_size, Some(2048));
         assert_eq!(req.limit, Some(5));
         assert_eq!(req.stale_days, Some(30));
+        assert_eq!(req.exclude_patterns, vec!["**/*.log".to_string(), "tmp/**".to_string()]);
     }
 
     #[test]
