@@ -1,6 +1,10 @@
 {
   "phase": "development",
-  "iteration": 3,
-  "reason": "设计已确认，dev-cli-tui已完成核心扫描引擎集成，dev-core-scanner已添加序列化支持，继续开发阶段。",
-  "notes": ["dev-cli-tui: 核心扫描引擎集成已完成，支持JSON和表格输出", "dev-core-scanner: 添加serde依赖和Serialize派生，基础扫描功能正常"]
+  "iteration": 4,
+  "reason": "本轮完成 dev-cli-tui 参数校验与友好错误输出，并在小目录完成 JSON 自测；仍有测试与文档项未完成，保持开发阶段。",
+  "notes": [
+    "dev-cli-tui: 参数验证与错误提示完成；TopN/扩展名展示正常",
+    "dev-cli-tui: 自测命令运行通过（delivery-runner/test/tmp/tc3.Eqte）",
+    "dev-core-scanner: 并行遍历、TopN、扩展名统计与陈旧文件识别已实现并通过单元测试"
+  ]
 }

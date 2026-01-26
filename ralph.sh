@@ -136,14 +136,11 @@ run_coco_in_tmux() {
         echo "[ralph] 警告：coco 启动等待超时，尝试发送prompt" >&2
     fi
     
-    # 逐行发送 prompt 内容
-    while IFS= read -r line; do
-        # 使用 -- 分隔选项和内容，避免内容以 - 开头被误解析
-        tmux send-keys -t "$session_name:coco" -- "$line"
-        tmux send-keys -t "$session_name:coco" "Enter"
-        # 每行之间短暂暂停，确保coco能处理
-        sleep 0.5
-    done <<< "$prompt"
+    # 一次性发送整个 prompt 内容
+    echo "[ralph] 发送完整prompt..." >&2
+    # 使用 -l 选项发送字面量字符串，避免特殊字符被解析
+    tmux send-keys -t "$session_name:coco" -l "$prompt"
+    tmux send-keys -t "$session_name:coco" "Enter"
     
     # 等待 coco 完成（检测 RALPH_DONE 标记）
     # 解析超时时间（支持 s 和 m 后缀）
