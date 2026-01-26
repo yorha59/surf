@@ -107,14 +107,42 @@ run_coco_in_tmux() {
     tmux new-session -d -s "$session_name" -n "coco" \
         "coco -y --query-timeout \"${COCO_QUERY_TIMEOUT:-10m}\""
     
-    # 等待 coco 启动（短暂睡眠）
-    sleep 2
+    # 等待 coco 启动并完全加载
+    echo "[ralph] 等待 coco 启动完成..." >&2
+    local max_wait=30  # 最多等待30秒
+    local wait_start=$(date +%s)
+    local coco_ready=0
+    
+    while (( $(date +%s) - wait_start < max_wait )); do
+        # 捕获当前窗格内容
+        local pane_content=$(tmux capture-pane -t "$session_name:coco" -p 2>/dev/null || echo "")
+        
+        # 检查coco是否已就绪（出现shell mode或command mode提示）
+        if echo "$pane_content" | grep -q "\$ shell mode\|command mode\|⏵⏵ accept all tools"; then
+            coco_ready=1
+            echo "[ralph] coco 已就绪，开始发送prompt" >&2
+            break
+        fi
+        
+        # 检查是否仍在加载中（显示Working状态）
+        if echo "$pane_content" | grep -q "Working.*s • ESC to interrupt"; then
+            echo "[ralph] coco 仍在加载中，等待..." >&2
+        fi
+        
+        sleep 2
+    done
+    
+    if [[ $coco_ready -eq 0 ]]; then
+        echo "[ralph] 警告：coco 启动等待超时，尝试发送prompt" >&2
+    fi
     
     # 逐行发送 prompt 内容
     while IFS= read -r line; do
         # 使用 -- 分隔选项和内容，避免内容以 - 开头被误解析
         tmux send-keys -t "$session_name:coco" -- "$line"
         tmux send-keys -t "$session_name:coco" "Enter"
+        # 每行之间短暂暂停，确保coco能处理
+        sleep 0.5
     done <<< "$prompt"
     
     # 等待 coco 完成（检测 RALPH_DONE 标记）
@@ -161,8 +189,8 @@ run_coco_in_tmux() {
         echo "无输出"
     fi
     
-    # 清理
-    tmux kill-session -t "$session_name" 2>/dev/null || true
+    # 调试模式：保留 tmux 会话供观察
+    echo "[ralph] 调试模式：tmux 会话 '$session_name' 已保留，请使用 'tmux attach -t $session_name' 查看" >&2
 }
 
 ralph_git_guard_with_coco() {

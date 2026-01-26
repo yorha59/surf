@@ -175,6 +175,23 @@ fn print_table(result: &surf_core::ScanResult, limit: usize) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // 参数基础校验（仅针对单次扫描/TUI模式）
+    // - 路径存在且可访问
+    // - limit 必须为正数
+    // - threads（如提供）必须为正数
+    if !cli.service {
+        if !cli.path.exists() {
+            anyhow::bail!("路径不存在: {}", cli.path.display());
+        }
+        if cli.limit == 0 {
+            anyhow::bail!("参数 --limit 必须为正整数");
+        }
+        if let Some(t) = cli.threads {
+            if t == 0 {
+                anyhow::bail!("参数 --threads 必须为正整数");
+            }
+        }
+    }
     
     if cli.service {
         // 服务模式：当前版本仅占位
