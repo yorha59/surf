@@ -3,6 +3,7 @@ __pycache__
 release/
 .DS_Store
 *.log
+*.backup
 .env
 .env.*
 dist/
@@ -11,3 +12,4 @@ out/
 .next/
 node_modules/
 .coco
+workspaces/delivery-runner/

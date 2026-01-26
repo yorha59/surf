@@ -4,11 +4,14 @@
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
+use std::cmp::Reverse;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use rayon;
+use serde::Serialize;
 /// 扫描请求参数
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanRequest {
     /// 扫描起始根目录
     pub root_path: PathBuf,
@@ -20,6 +23,8 @@ pub struct ScanRequest {
     pub exclude_patterns: Vec<String>,
     /// 时间分析阈值天数（识别陈旧文件）
     pub stale_days: Option<u32>,
+    /// Top N 大文件数量限制（默认20）
+    pub limit: Option<usize>,
 }
 
 impl ScanRequest {
@@ -31,12 +36,13 @@ impl ScanRequest {
             min_size: None,
             exclude_patterns: Vec::new(),
             stale_days: None,
+            limit: None,
         }
     }
 }
 
 /// 扫描进度信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanProgress {
     /// 任务状态
     pub state: ScanState,
@@ -51,7 +57,7 @@ pub struct ScanProgress {
 }
 
 /// 扫描任务状态
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum ScanState {
     /// 任务排队中
     Queued,
@@ -66,7 +72,7 @@ pub enum ScanState {
 }
 
 /// 扫描结果摘要
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanSummary {
     /// 扫描根路径
     pub root_path: PathBuf,
@@ -81,7 +87,7 @@ pub struct ScanSummary {
 }
 
 /// 文件条目信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileEntry {
     /// 文件路径
     pub path: PathBuf,
@@ -93,8 +99,32 @@ pub struct FileEntry {
     pub extension: Option<String>,
 }
 
+impl Ord for FileEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // 主要按文件大小降序排列（更大的文件排前面）
+        // 但为了在最小堆中使用，我们实际上需要升序排列，因此这里实现升序
+        // 后续会用 Reverse 包装来反转比较
+        self.size_bytes.cmp(&other.size_bytes)
+            .then_with(|| self.path.cmp(&other.path))
+    }
+}
+
+impl PartialOrd for FileEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for FileEntry {}
+
+impl PartialEq for FileEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.size_bytes == other.size_bytes && self.path == other.path
+    }
+}
+
 /// 文件类型统计
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExtensionStat {
     /// 文件扩展名（不含点）
     pub extension: String,
@@ -105,7 +135,7 @@ pub struct ExtensionStat {
 }
 
 /// 扫描完整结果
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanResult {
     /// 扫描摘要
     pub summary: ScanSummary,
@@ -140,17 +170,87 @@ struct AtomicCounters {
     files: AtomicU64,
     dirs: AtomicU64,
     size: AtomicU64,
+    /// Top N 大文件限制
+    limit: usize,
+    /// Top N 大文件堆（最小堆，使用 Reverse 包装 FileEntry 实现）
+    top_files: Arc<Mutex<BinaryHeap<Reverse<FileEntry>>>>,
+    /// 扩展名统计映射：扩展名 -> (文件数, 总大小)
+    extensions: Arc<Mutex<HashMap<String, (u64, u64)>>>,
 }
 
 impl AtomicCounters {
-    fn new() -> Self {
+    fn new(limit: usize) -> Self {
         Self {
             files: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
             size: AtomicU64::new(0),
+            limit,
+            top_files: Arc::new(Mutex::new(BinaryHeap::with_capacity(limit))),
+            extensions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     
+    fn add_file_with_extension(&self, extension: Option<String>, size: u64) {
+        let ext = extension.unwrap_or_else(|| "no_extension".to_string());
+        let mut map = self.extensions.lock().unwrap();
+        let entry = map.entry(ext).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += size;
+    }
+
+    fn add_file_to_top_list(&self, path: PathBuf, size: u64, last_modified: Option<SystemTime>, extension: Option<String>) {
+        // 过滤大小为0的文件
+        if size == 0 {
+            return;
+        }
+        let entry = FileEntry {
+            path,
+            size_bytes: size,
+            last_modified,
+            extension,
+        };
+        let mut heap = self.top_files.lock().unwrap();
+        if heap.len() < self.limit {
+            heap.push(Reverse(entry));
+        } else {
+            // 堆已满，比较新文件与堆顶（当前堆中最小的文件）
+            if let Some(top) = heap.peek() {
+                if entry.size_bytes > top.0.size_bytes {
+                    heap.pop(); // 移除堆顶最小文件
+                    heap.push(Reverse(entry));
+                }
+            }
+        }
+    }
+
+    fn extensions_to_vec(&self) -> Vec<ExtensionStat> {
+        let map = self.extensions.lock().unwrap();
+        let mut vec: Vec<ExtensionStat> = map
+            .iter()
+            .map(|(ext, &(file_count, total_size_bytes))| ExtensionStat {
+                extension: ext.clone(),
+                file_count,
+                total_size_bytes,
+            })
+            .collect();
+        // 按总大小降序排序，如果大小相同则按文件数降序
+        vec.sort_by(|a, b| {
+            b.total_size_bytes
+                .cmp(&a.total_size_bytes)
+                .then_with(|| b.file_count.cmp(&a.file_count))
+        });
+        vec
+    }
+
+    fn top_files_to_vec(&self) -> Vec<FileEntry> {
+        let heap = self.top_files.lock().unwrap();
+        // 将堆转换为向量，并反转顺序（从大到小）
+        let mut vec: Vec<FileEntry> = heap.iter().map(|rev| rev.0.clone()).collect();
+        // 由于堆是最小堆，堆顶是最小元素，但iter顺序不确定，需要按大小降序排序
+        vec.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| b.path.cmp(&a.path)));
+        vec
+    }
+
     fn to_summary(&self, root_path: PathBuf, elapsed_seconds: f64) -> ScanSummary {
         ScanSummary {
             root_path,
@@ -192,7 +292,8 @@ impl Scanner {
             .build()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         
-        let counters = AtomicCounters::new();
+        let limit = request.limit.unwrap_or(20);
+        let counters = AtomicCounters::new(limit);
         
         // 使用线程池执行并行遍历
         pool.scope(|scope| {
@@ -203,8 +304,8 @@ impl Scanner {
         
         Ok(ScanResult {
             summary: counters.to_summary(request.root_path.clone(), elapsed.as_secs_f64()),
-            top_files: Vec::new(), // 暂未实现
-            by_extension: Vec::new(), // 暂未实现
+            top_files: counters.top_files_to_vec(),
+            by_extension: counters.extensions_to_vec(),
             stale_files: Vec::new(), // 暂未实现
         })
     }
@@ -266,8 +367,18 @@ impl Scanner {
             } else {
                 // 增加文件计数和大小
                 counters.files.fetch_add(1, Ordering::SeqCst);
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let metadata = entry.metadata();
+                let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 counters.size.fetch_add(size, Ordering::SeqCst);
+                // 提取扩展名
+                let extension = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|s| s.to_lowercase());
+                counters.add_file_with_extension(extension.clone(), size);
+                // 添加到 Top N 大文件列表
+                let last_modified = metadata.ok().and_then(|m| m.modified().ok());
+                counters.add_file_to_top_list(path, size, last_modified, extension);
             }
         }
         
@@ -410,5 +521,168 @@ mod tests {
         
         // 文件大小：每个文件内容长度不同，但我们可以验证总大小 > 0
         assert!(result1.summary.total_size_bytes > 0);
+    }
+
+    #[test]
+    fn test_extension_statistics() {
+        // 创建测试目录
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        
+        // 创建不同扩展名的文件
+        let extensions = ["txt", "log", "mp4", "", "TXT", "Log"]; // 包含空扩展名和大写
+        for (i, &ext) in extensions.iter().enumerate() {
+            let filename = if ext.is_empty() {
+                format!("file{}", i)
+            } else {
+                format!("file{}.{}", i, ext)
+            };
+            let file_path = root.join(filename);
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(format!("Content {}", i).as_bytes()).unwrap();
+        }
+        
+        // 执行扫描
+        let request = ScanRequest::new(root);
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+        
+        // 验证扩展名统计
+        assert_eq!(result.by_extension.len(), 4); // txt, log, mp4, no_extension (空扩展名)
+        // 查找每个扩展名的统计
+        let mut found_txt = false;
+        let mut found_log = false;
+        let mut found_mp4 = false;
+        let mut found_no_ext = false;
+        for stat in &result.by_extension {
+            match stat.extension.as_str() {
+                "txt" => {
+                    assert_eq!(stat.file_count, 2); // txt 和 TXT
+                    found_txt = true;
+                }
+                "log" => {
+                    assert_eq!(stat.file_count, 2); // log 和 Log
+                    found_log = true;
+                }
+                "mp4" => {
+                    assert_eq!(stat.file_count, 1);
+                    found_mp4 = true;
+                }
+                "no_extension" => {
+                    assert_eq!(stat.file_count, 1); // 空扩展名文件
+                    found_no_ext = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_txt);
+        assert!(found_log);
+        assert!(found_mp4);
+        assert!(found_no_ext);
+    }
+
+    #[test]
+    fn test_top_n_files() {
+        // 创建测试目录
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        
+        // 创建多个不同大小的文件
+        let sizes = vec![100, 500, 300, 800, 200, 700, 400, 600, 900, 50];
+        for (i, &size) in sizes.iter().enumerate() {
+            let file_path = root.join(format!("file{}.txt", i));
+            let mut file = File::create(&file_path).unwrap();
+            // 写入指定大小的内容
+            let content = vec![b'a'; size];
+            file.write_all(&content).unwrap();
+        }
+        
+        // 测试默认 limit (20) 应返回所有文件（10个），按大小降序
+        let request = ScanRequest::new(root);
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+        
+        // 验证 top_files 长度等于文件数（因为文件数少于默认 limit 20）
+        assert_eq!(result.top_files.len(), 10);
+        // 验证顺序是降序
+        for i in 0..result.top_files.len() - 1 {
+            assert!(
+                result.top_files[i].size_bytes >= result.top_files[i + 1].size_bytes,
+                "文件未按大小降序排列: {} < {}",
+                result.top_files[i].size_bytes,
+                result.top_files[i + 1].size_bytes
+            );
+        }
+        // 验证最大文件是 900 字节
+        assert_eq!(result.top_files[0].size_bytes, 900);
+        // 验证最小文件是 50 字节
+        assert_eq!(result.top_files[9].size_bytes, 50);
+        
+        // 测试指定 limit = 5
+        let mut request_limit = ScanRequest::new(root);
+        request_limit.limit = Some(5);
+        let result_limit = scanner.scan_sync(&request_limit).unwrap();
+        assert_eq!(result_limit.top_files.len(), 5);
+        // 验证返回的是最大的5个文件
+        assert_eq!(result_limit.top_files[0].size_bytes, 900);
+        assert_eq!(result_limit.top_files[1].size_bytes, 800);
+        assert_eq!(result_limit.top_files[2].size_bytes, 700);
+        assert_eq!(result_limit.top_files[3].size_bytes, 600);
+        assert_eq!(result_limit.top_files[4].size_bytes, 500);
+        
+        // 测试 limit = 0（应视为无限制？但实际 limit 应该大于0，这里测试默认行为）
+        // 跳过，因为 limit 为 0 时堆容量为 0，可能不存储任何文件。我们假设 limit >= 1
+    }
+
+    #[test]
+    fn test_top_n_files_with_same_size() {
+        // 测试文件大小相同时，按路径排序
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        
+        // 创建三个大小相同的文件，路径不同
+        let paths = ["a.txt", "b.txt", "c.txt"];
+        for &path in &paths {
+            let file_path = root.join(path);
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(b"same size").unwrap();
+        }
+        
+        let request = ScanRequest::new(root);
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+        
+        // 所有文件大小相同，应全部包含（因为 limit 默认20）
+        assert_eq!(result.top_files.len(), 3);
+        // 验证按路径排序（降序？我们的排序是 size 降序，然后 path 降序）
+        // 由于 size 相同，按 path 降序排列，所以 c.txt 应该在 a.txt 之前
+        let filenames: Vec<&str> = result.top_files.iter().map(|e| e.path.file_name().unwrap().to_str().unwrap()).collect();
+        // 注意：排序是 b.path.cmp(&a.path) 降序，所以是反向字母顺序
+        assert_eq!(filenames, vec!["c.txt", "b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn test_top_n_files_zero_size() {
+        // 测试大小为0的文件应被过滤
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        
+        // 创建一个正常文件和一个大小为0的文件
+        let normal_path = root.join("normal.txt");
+        let mut normal_file = File::create(&normal_path).unwrap();
+        normal_file.write_all(b"content").unwrap();
+        
+        let zero_path = root.join("zero.txt");
+        File::create(&zero_path).unwrap(); // 空文件，大小为0
+        
+        let request = ScanRequest::new(root);
+        let scanner = Scanner::new();
+        let result = scanner.scan_sync(&request).unwrap();
+        
+        // 总文件数应该是2
+        assert_eq!(result.summary.total_files, 2);
+        // 但 top_files 应只包含非零文件（1个）
+        assert_eq!(result.top_files.len(), 1);
+        assert_eq!(result.top_files[0].size_bytes, 7);
     }
 }

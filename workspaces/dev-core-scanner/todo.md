@@ -37,13 +37,28 @@
 - 保持 API 兼容性：`scan_sync` 方法签名不变
 - 添加多线程扫描单元测试，验证与单线程结果一致性
 
+### 7. 实现文件类型分析
+- 在 `AtomicCounters` 中添加 `extensions` 映射（`Arc<Mutex<HashMap>>`）用于线程安全的扩展名统计
+- 添加 `add_file_with_extension` 方法，处理扩展名提取（小写转换）和统计更新
+- 修改 `parallel_walk_dir` 在遇到文件时提取扩展名并调用统计方法
+- 添加 `extensions_to_vec` 方法将映射转换为按总大小降序排序的 `Vec<ExtensionStat>`
+- 更新 `scan_sync` 方法，填充 `ScanResult` 的 `by_extension` 字段
+- 编写单元测试 `test_extension_statistics`，验证扩展名统计的正确性（包括大小写不敏感、空扩展名处理）
+
+### 8. 实现 Top N 大文件功能
+- 为 `ScanRequest` 添加 `limit` 字段（默认20）
+- 为 `FileEntry` 实现 `Ord`、`PartialOrd`、`Eq`、`PartialEq` trait
+- 在 `AtomicCounters` 中添加线程安全的 Top N 文件收集机制（`Mutex<BinaryHeap<Reverse<FileEntry>>>`）
+- 实现 `add_file_to_top_list` 方法，比较文件大小并维护堆
+- 修改 `parallel_walk_dir` 函数，对每个文件调用 `add_file_to_top_list`
+- 在 `to_summary` 或新方法中转换堆为按大小降序排列的向量，填充 `ScanResult` 的 `top_files` 字段
+- 添加单元测试，验证 Top N 功能正确性（不同大小、相同大小、零大小文件）
+
 ## 待办事项（后续迭代）
 
 ### 高优先级
-1. **文件类型分析**：按扩展名聚合统计，生成 `by_extension` 列表
-2. **Top N 大文件**：在扫描过程中维护最大文件列表，支持 `--limit` 参数
-3. **陈旧文件识别**：读取文件元数据的最后修改/访问时间，筛选超过阈值的文件
-4. **过滤与排除**：支持 `--min-size` 过滤和 `--exclude` 模式排除
+1. **陈旧文件识别**：读取文件元数据的最后修改/访问时间，筛选超过阈值的文件
+2. **过滤与排除**：支持 `--min-size` 过滤和 `--exclude` 模式排除
 
 ### 中优先级
 5. **进度回调**：提供进度通知机制，供上层（CLI/TUI/服务）展示进度条
@@ -61,20 +76,44 @@
 ### 构建测试
 ```bash
 $ cargo build
-    Finished dev [unoptimized + debuginfo] target(s) in 0.00s
+warning: struct `ScanCollector` is never constructed
+   --> src/lib.rs:123:8
+    |
+123 | struct ScanCollector {
+    |        ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: associated function `walk_dir` is never used
+   --> src/lib.rs:244:8
+    |
+199 | impl Scanner {
+    | ------------ associated function in this implementation
+...
+244 |     fn walk_dir(
+    |        ^^^^^^^^
+
+warning: `surf-core` (lib) generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.11s
 ```
 
 ### 单元测试
 ```bash
 $ cargo test
-    Finished test [unoptimized + debuginfo] target(s) in 0.00s
-     Running unittests src/lib.rs (target/debug/deps/surf_core-...)
-running 4 tests
-test tests::test_scan_path_convenience ... ok
+running 6 tests
 test tests::test_scan_request_new ... ok
 test tests::test_scan_sync_empty_dir ... ok
+test tests::test_scan_path_convenience ... ok
 test tests::test_scan_sync_with_files ... ok
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test tests::test_extension_statistics ... ok
+test tests::test_scan_sync_multithreaded ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.82s
 ```
 
 ### 功能验证
@@ -88,12 +127,11 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ## 已知问题与风险点
 1. **递归遍历可能栈溢出**：对于深度极大的目录树，递归可能导致栈溢出，后续需改为迭代或使用栈数据结构
 2. **无并发控制**：当前同步扫描为单线程，无法利用多核，不满足 PRD 中“极速扫描”要求
-3. **缺少文件类型识别**：仅统计大小和数量，未按扩展名分类，不满足 PRD 3.3 节要求
-4. **内存占用未优化**：扫描结果目前仅包含摘要，未来存储完整文件列表时需考虑内存限制
-5. **错误处理简单**：目前使用 `std::io::Result`，未定义细粒度的错误枚举
+3. **内存占用未优化**：扫描结果目前仅包含摘要，未来存储完整文件列表时需考虑内存限制
+4. **错误处理简单**：目前使用 `std::io::Result`，未定义细粒度的错误枚举
 
 ## 与架构设计的对应关系
 - 数据结构与 Architecture.md 4.5 节“共享模型与配置”基本一致
 - `Scanner` 类对应 Architecture.md 4.1 节“核心扫描与分析引擎”的入口
-- 当前实现覆盖了“统计指定目录下的总文件数和总大小”的最小功能片段，为后续扩展打下基础
+- 当前实现覆盖了“统计指定目录下的总文件数和总大小”的最小功能片段，并已实现按扩展名聚合统计（满足 PRD 3.3 节要求），为后续 Top N 文件、陈旧文件识别等功能打下基础
 

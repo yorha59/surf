@@ -1,6 +1,6 @@
 {
   "phase": "development",
   "iteration": 3,
-  "reason": "设计已确认，删除策略已明确，TUI 不支持删除功能，推进到开发阶段。",
-  "notes": []
+  "reason": "设计已确认，dev-cli-tui已完成核心扫描引擎集成，dev-core-scanner已添加序列化支持，继续开发阶段。",
+  "notes": ["dev-cli-tui: 核心扫描引擎集成已完成，支持JSON和表格输出", "dev-core-scanner: 添加serde依赖和Serialize派生，基础扫描功能正常"]
 }
