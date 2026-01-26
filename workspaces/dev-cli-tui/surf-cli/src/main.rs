@@ -8,6 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use ctrlc;
 
+mod tui_model;
 mod tui;
 
 /// Surf CLI: disk usage scanner (minimal initial implementation).

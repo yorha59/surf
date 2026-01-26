@@ -11,17 +11,8 @@
 //!
 //! 提供扫描进度显示、结果浏览与详情查看功能。
 //! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
-//! TUI 模块，用于 `--tui` 模式。
-//!
-//! 提供扫描进度显示、结果浏览与详情查看功能。
-//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
-//! TUI 模块，用于 `--tui` 模式。
-//!
-//! 提供扫描进度显示、结果浏览与详情查看功能。
-//! 支持键盘导航（↑/k ↓/j）与退出（q/Esc/Ctrl+C）。
 
-mod tui_model;
-use tui_model::{
+use crate::tui_model::{
     build_tree,
     DirNode,
     NodeType,

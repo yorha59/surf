@@ -158,12 +158,15 @@ fn insert_file_into_tree(root: &mut DirNode, root_path: &Path, file_path: &Path,
     // 从根开始，依次下钻/创建每一级目录节点，并累加 size。
     let mut node = root;
     for dir_path in &ancestors {
-        // 尝试在当前节点下找到对应目录；如不存在则创建。
-        if let Some(existing) = node
+        // 先通过不可变迭代找到目标子目录的索引，避免同时持有
+        // `node.children` 的可变和不可变借用。
+        let existing_idx = node
             .children
-            .iter_mut()
-            .find(|child| child.is_directory() && child.full_path == *dir_path)
-        {
+            .iter()
+            .position(|child| child.is_directory() && child.full_path == *dir_path);
+
+        if let Some(idx) = existing_idx {
+            let existing = &mut node.children[idx];
             existing.size = existing.size.saturating_add(size);
             node = existing;
         } else {

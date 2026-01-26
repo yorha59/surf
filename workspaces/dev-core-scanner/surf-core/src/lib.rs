@@ -237,15 +237,15 @@ impl ScanHandle {
                 }
             });
 
-            // 存储结果
-            *thread_state.result.lock().unwrap() = Some(scan_result);
-            
-            // 根据扫描结果设置 error 字段
+            // 根据扫描结果设置 error 字段（先基于引用更新错误，再保存拥有权结果）
             let mut error_lock = thread_state.error.lock().unwrap();
             *error_lock = match &scan_result {
                 Ok(_) => None,
                 Err(e) => Some(e.to_string()),
             };
+
+            // 存储结果
+            *thread_state.result.lock().unwrap() = Some(scan_result);
             
             // 标记完成
             thread_state.done.store(true, Ordering::SeqCst);
