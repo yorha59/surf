@@ -142,6 +142,10 @@ run_coco_in_tmux() {
         echo "[ralph] 警告：coco 启动等待超时，尝试发送prompt" >&2
     fi
     
+    # 清除窗格历史，避免后续解析时匹配到 prompt 文本
+    echo "[ralph] 清除窗格历史..." >&2
+    tmux clear-history -t "$session_name:coco" 2>/dev/null || true
+    
     # 一次性发送整个 prompt 内容
     echo "[ralph] 发送完整prompt..." >&2
     # 使用 -l 选项发送字面量字符串，避免特殊字符被解析
@@ -166,30 +170,102 @@ run_coco_in_tmux() {
     esac
     # 增加一些缓冲时间
     timeout_seconds=$(( timeout_seconds + 30 ))
-    local start_time=$(date +%s)
     
-    # 捕获输出并检测完成标记
+    echo "[ralph] 等待coco执行完成，超时: ${timeout_seconds}秒..." >&2
+    
+    # 等待一小段时间，确保prompt开始处理
+    sleep 3
+    
+    local start_time=$(date +%s)
     local output=""
     local done_found=0
+    local no_output_count=0
+    local max_no_output=10  # 最多10次无输出检查（约20秒）
     while (( $(date +%s) - start_time < timeout_seconds )); do
-        # 捕获当前窗格内容
-        local current_output=$(tmux capture-pane -t "$session_name:coco" -p 2>/dev/null || echo "")
+        # 捕获整个窗格历史（从开头到现在）
+        local current_output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
+        
         if [[ -n "$current_output" ]]; then
             output="$current_output"
+            no_output_count=0
+            
             # 检查是否包含完成标记
             if echo "$output" | grep -q "RALPH_DONE="; then
                 done_found=1
+                echo "[ralph] 检测到 RALPH_DONE 标记" >&2
+                # 再等待2秒，确保所有输出都被捕获
+                sleep 2
+                # 最后捕获一次完整输出
+                output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
+                break
+            fi
+            
+            # 检查coco是否已返回交互模式
+            if echo "$output" | grep -q "\$ shell mode\|command mode\|⏵⏵ accept all tools"; then
+                echo "[ralph] coco 已返回交互模式，可能执行完成" >&2
+                done_found=1
+                # 等待1秒后最后捕获一次
+                sleep 1
+                output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
+                break
+            fi
+        else
+            # 无输出计数
+            ((no_output_count++))
+            if (( no_output_count > max_no_output )); then
+                echo "[ralph] 警告：连续 ${max_no_output} 次未捕获到输出，可能coco已退出" >&2
                 break
             fi
         fi
+        
         sleep 2
     done
+    
+    if (( done_found == 0 )); then
+        echo "[ralph] 警告：等待coco执行超时" >&2
+        # 超时前最后捕获一次
+        output=$(tmux capture-pane -t "$session_name:coco" -p -S - 2>/dev/null || echo "")
+    fi
     
     # 输出结果
     if [[ -n "$output" ]]; then
         echo "$output"
     else
         echo "无输出"
+    fi
+    
+    # 解析 flag 并写入文件（如果提供了 flag_file 参数）
+    local flag_file="${3:-}"
+    if [[ -n "$flag_file" ]]; then
+        # 提取 RALPH_DONE 值
+        local ralph_done="false"
+        if echo "$output" | grep -q "^RALPH_DONE=true$" || echo "$output" | grep -q "RALPH_DONE=true[^<]"; then
+            ralph_done="true"
+        elif echo "$output" | grep -q "^RALPH_DONE=false$" || echo "$output" | grep -q "RALPH_DONE=false[^<]"; then
+            ralph_done="false"
+        fi
+        
+        # 提取 HUMAN_REQUIRED 值
+        local human_required="false"
+        if echo "$output" | grep -q "^HUMAN_REQUIRED=true$" || echo "$output" | grep -q "HUMAN_REQUIRED=true[^<]"; then
+            human_required="true"
+        elif echo "$output" | grep -q "^HUMAN_REQUIRED=false$" || echo "$output" | grep -q "HUMAN_REQUIRED=false[^<]"; then
+            human_required="false"
+        fi
+        
+        # 提取 AGENTS_USED 值
+        local agents_used="orchestrator"
+        if agent_line=$(echo "$output" | grep -E "AGENTS_USED=" | tail -n1); then
+            agents_used="${agent_line#AGENTS_USED=}"
+        fi
+        
+        # 写入 flag 文件
+        cat > "$flag_file" <<EOF
+RALPH_DONE=$ralph_done
+HUMAN_REQUIRED=$human_required
+AGENTS_USED=$agents_used
+EOF
+        echo "[ralph] Flag 已写入: $flag_file" >&2
     fi
     
     # 调试模式：保留 tmux 会话供观察
@@ -368,57 +444,66 @@ EOF
   # 调用 coco 执行本轮编排工作
   # 使用 -y 自动允许工具调用，避免交互式确认导致脚本卡住
   # 使用 --query-timeout 限制单轮查询时间，默认 10 分钟，可通过 COCO_QUERY_TIMEOUT 环境变量覆写
-  # 通过 tee 让用户实时看到编排者输出，同时保存在临时文件中供后续解析
   echo "[ralph] 调用 coco 执行第 ${step} 轮编排..." >&2
-  TMPFILE="$(mktemp -t surf-ralph-XXXXXX)"
+  FLAGFILE="$(mktemp -t surf-ralph-flags-XXXXXX)"
 
   set +e
   echo "[ralph] 在 tmux 中执行（会话名: surf-ralph-${step}）" >&2
-  run_coco_in_tmux "$step" "$PROMPT" | tee "$TMPFILE"
+  # 直接捕获 run_coco_in_tmux 的输出，不通过 tee 和临时文件
+  RESPONSE=$(run_coco_in_tmux "$step" "$PROMPT" "$FLAGFILE")
   COCO_EXIT=$?
   set -e
 
   if (( COCO_EXIT != 0 )); then
     echo "[ralph] 调用 coco 失败，退出码: $COCO_EXIT" >&2
     # 将本轮已产生的输出也打印到 stderr，方便排查
-    if [[ -s "$TMPFILE" ]]; then
+    if [[ -n "$RESPONSE" ]]; then
       echo "[ralph] coco 部分输出如下：" >&2
-      cat "$TMPFILE" >&2 || true
+      echo "$RESPONSE" >&2 || true
     fi
-    rm -f "$TMPFILE"
+    rm -f "$FLAGFILE"
     exit "$COCO_EXIT"
   fi
-
-  RESPONSE="$(cat "$TMPFILE")"
-  rm -f "$TMPFILE"
-
-  done_flag="false"
-  human_flag="false"
-  agents="orchestrator"
-
-  # 提取本轮使用的 Agent 列表（如果 Coco 遵循了 AGENTS_USED 约定）
-  if agent_line=$(echo "$RESPONSE" | grep -E "AGENTS_USED=" | tail -n1); then
-    agents="${agent_line#AGENTS_USED=}"
-  fi
-
-  echo "[ralph] 第 $step 轮 Agent: $agents" >&2
-
-  if echo "$RESPONSE" | grep -q "RALPH_DONE=true"; then
-    done_flag="true"
-    echo "[ralph] 检测到 RALPH_DONE=true，本轮需求已闭环，退出循环" >&2
-  fi
-
-  if echo "$RESPONSE" | grep -q "RALPH_DONE=false"; then
-    done_flag="false"
-    echo "[ralph] 本轮仍有剩余工作，准备进入下一轮" >&2
+  
+  # 读取 flag 文件（如果存在）
+  if [[ -f "$FLAGFILE" ]]; then
+    echo "[ralph] 从 flag 文件读取解析结果: $FLAGFILE" >&2
+    # 解析 flag 文件
+    while IFS='=' read -r key value; do
+      case "$key" in
+        RALPH_DONE)
+          if [[ "$value" == "true" ]]; then
+            done_flag="true"
+          else
+            done_flag="false"
+          fi
+          ;;
+        HUMAN_REQUIRED)
+          if [[ "$value" == "true" ]]; then
+            human_flag="true"
+          else
+            human_flag="false"
+          fi
+          ;;
+        AGENTS_USED)
+          agents="$value"
+          ;;
+      esac
+    done < "$FLAGFILE"
+    rm -f "$FLAGFILE"
   else
-    echo "[ralph] 警告：未检测到 RALPH_DONE 标记，默认认为任务尚未完成，继续下一轮" >&2
+    echo "[ralph] 警告：未找到 flag 文件，使用原始解析逻辑" >&2
+    # 设置默认值
+    done_flag="false"
+    human_flag="false"
+    agents="orchestrator"
+    
+    # 尝试从 RESPONSE 中提取 AGENTS_USED
+    if agent_line=$(echo "$RESPONSE" | grep -E "AGENTS_USED=" | tail -n1); then
+      agents="${agent_line#AGENTS_USED=}"
+    fi
   fi
 
-  if echo "$RESPONSE" | grep -q "HUMAN_REQUIRED=true"; then
-    human_flag="true"
-    echo "[ralph] 检测到 HUMAN_REQUIRED=true，本轮需要人类确认，暂停循环" >&2
-  fi
 
   # 将本轮完整控制台信息同步到飞书（如配置了 FEISHU_WEBHOOK）
   # 内容包含轮次标记、Coco 输出以及结束状态，便于在飞书侧完整查看本轮执行情况

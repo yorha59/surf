@@ -692,6 +692,7 @@ fn run_tui_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, resu
 mod tests {
     use super::*;
     use clap::Parser;
+    use serde_json::Value;
 
     #[test]
     fn test_parse_size_string_units() {
@@ -749,5 +750,66 @@ mod tests {
         assert_eq!(req.min_size, Some(2048));
         assert_eq!(req.limit, Some(5));
         assert_eq!(req.stale_days, Some(30));
+    }
+
+    #[test]
+    fn test_format_bytes_human_readable() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 2), "2.00 MB");
+    }
+
+    #[test]
+    fn test_json_output_structure_contains_keys() {
+        // 构造一个最小可用的 ScanResult，用于验证 JSON 输出结构
+        let summary = surf_core::ScanSummary {
+            root_path: PathBuf::from("."),
+            total_files: 3,
+            total_dirs: 1,
+            total_size_bytes: 12345,
+            elapsed_seconds: 0.12,
+        };
+        let top_files = vec![
+            surf_core::FileEntry {
+                path: PathBuf::from("a.bin"),
+                size_bytes: 100,
+                last_modified: None,
+                extension: Some("bin".to_string()),
+            },
+            surf_core::FileEntry {
+                path: PathBuf::from("b.log"),
+                size_bytes: 50,
+                last_modified: None,
+                extension: Some("log".to_string()),
+            },
+        ];
+        let by_extension = vec![surf_core::ExtensionStat {
+            extension: "bin".to_string(),
+            file_count: 2,
+            total_size_bytes: 150,
+        }];
+        let result = surf_core::ScanResult {
+            summary,
+            top_files,
+            by_extension,
+            stale_files: Vec::new(),
+        };
+
+        let json_str = serde_json::to_string_pretty(&result).expect("JSON 序列化失败");
+        let v: Value = serde_json::from_str(&json_str).expect("JSON 解析失败");
+
+        // 断言顶层键存在
+        assert!(v.get("summary").is_some());
+        assert!(v.get("top_files").is_some());
+        assert!(v.get("by_extension").is_some());
+        assert!(v.get("stale_files").is_some());
+
+        // 断言 summary 关键字段存在
+        let summary_obj = v.get("summary").unwrap();
+        assert!(summary_obj.get("total_files").is_some());
+        assert!(summary_obj.get("total_dirs").is_some());
+        assert!(summary_obj.get("total_size_bytes").is_some());
     }
 }

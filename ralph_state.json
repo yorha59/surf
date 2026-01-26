@@ -1,10 +1,10 @@
 {
   "phase": "development",
-  "iteration": 5,
-  "reason": "本轮为 dev-cli-tui 增加 CLI 单元测试（parse_size 与 Clap 解析），3 项测试通过；仍有集成测试与文档项未完成，保持开发阶段。",
+  "iteration": 6,
+  "reason": "为 dev-cli-tui 新增 JSON 输出结构单元测试，连同已有 4 项测试共计 5 项全部通过；集成测试与文档仍未完成，继续停留在开发阶段。",
   "notes": [
-    "dev-cli-tui: 参数验证与错误提示完成；新增3项单元测试通过",
-    "dev-cli-tui: 自测命令运行通过（delivery-runner/test/tmp/tc3.Eqte）",
+    "dev-cli-tui: 新增 JSON 序列化结构单元测试（验证顶层与关键字段）",
+    "dev-cli-tui: 参数验证与错误提示已完成；现有测试 5/5 通过",
     "dev-core-scanner: 并行遍历、TopN、扩展名统计与陈旧文件识别已实现并通过单元测试"
   ]
 }
