@@ -1,12 +1,12 @@
 {
   "phase": "delivery",
-  "iteration": 15,
-  "reason": "dev-macos-gui 已完成基于 fetch(\"/rpc\") 的 JSON-RPC 端到端联调并在工作区落盘自测证据（todo.md 与 e2e 截图）；dev-service-api 前一轮已稳定提供 POST /rpc（scan.start/status/result/cancel）。本轮开发阶段目标已闭合，推进至交付阶段以汇总各开发产物并基于 PRD 进行独立测试。",
+  "iteration": 16,
+  "reason": "交付阶段已完成：delivery-runner 工作区的独立测试全部通过，未记录失败用例；release/ 目录下已汇总 CLI/核心库/服务/GUI 的构建产物，可视为当前 PRD 范围闭环。",
   "notes": [
-    "design-architect：Architecture.md 4.4.1 约定 GUI 通过 HTTP + JSON-RPC 主路径（/rpc）接入",
-    "dev-service-api：POST /rpc 可用，方法族 scan.start/status/result/cancel 已对齐并自测",
-    "dev-macos-gui：TopBar 新增‘开始扫描（联调）’入口，ServiceClient 统一封装 request()/scan.*，已在开发模式下完成一次端到端联调；证据：workspaces/dev-macos-gui/todo.md、workspaces/dev-macos-gui/e2e-tc1.png",
-    "交付阶段动作：调用 delivery-runner 在交付工作区汇总 service/cli/gui 产物，更新 release/ 与 test/case.md，执行独立用例并生成 test/failures.md（如有）",
-    "环境限制：Tauri Rust 宿主受 rustc < 1.88 影响，仅影响打包；开发模式联调不受阻，交付阶段如需打包请在 1.88+ 的 macOS 环境执行"
+    "交付测试：workspaces/delivery-runner/test/test-log.md 显示 TC-CLI-A/B/C 均通过",
+    "失败用例：workspaces/delivery-runner/test/failures.md 为空",
+    "发布产物：workspaces/delivery-runner/release/ 目录存在 cli/surf、lib/libsurf_core.* 等",
+    "设计约定已兑现：Architecture.md 4.4.1 指定的 HTTP + JSON-RPC 主路径完成与 GUI 联调",
+    "下一步：如需进一步发布或部署，请基于 release/ 下产物执行人工验收与分发"
   ]
 }
