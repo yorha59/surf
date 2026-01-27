@@ -1,9 +1,10 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::thread::sleep;
 use std::time::Duration;
+
 use serde_json::{json, Value};
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 12345; // 使用不同端口避免冲突
@@ -35,17 +36,36 @@ impl Drop for ServiceHandle {
     }
 }
 
+/// 通过 HTTP POST /rpc 发送 JSON-RPC 请求并解析响应体
 fn send_request(request: &Value) -> Value {
+    let body = serde_json::to_string(request).unwrap();
+    let request_http = format!(
+        "POST /rpc HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        HOST,
+        PORT,
+        body.len(),
+        body
+    );
+
     let mut stream = TcpStream::connect(format!("{}:{}", HOST, PORT))
         .expect("failed to connect to service");
-    let request_str = serde_json::to_string(request).unwrap();
-    stream.write_all(request_str.as_bytes()).unwrap();
+    stream
+        .write_all(request_http.as_bytes())
+        .expect("failed to send request");
     stream.flush().unwrap();
-    // 关闭写半部，方便服务端检测 EOF 并优雅关闭连接
-    stream.shutdown(Shutdown::Write).unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    serde_json::from_str(&response).expect("failed to parse response")
+
+    let mut raw_response = String::new();
+    stream
+        .read_to_string(&mut raw_response)
+        .expect("failed to read response");
+
+    // 简单拆分 HTTP 响应，获取 JSON-RPC body 部分
+    let body_part = raw_response
+        .split("\r\n\r\n")
+        .nth(1)
+        .expect("invalid HTTP response: missing body");
+
+    serde_json::from_str(body_part).expect("failed to parse JSON-RPC response")
 }
 
 #[test]

@@ -11,7 +11,7 @@ cd /Users/bytedance/GitHub/surf/workspaces/dev-service-api
 cargo run --release -- --service --host 127.0.0.1 --port 1234
 ```
 
-不显式传递 `--host` / `--port` 时，默认监听在 `127.0.0.1:1234`。
+不显式传递 `--host` / `--port` 时，默认监听在 `127.0.0.1:1234`，对外提供 HTTP `POST /rpc` 入口，供 macOS GUI 及其他 HTTP 客户端通过 JSON-RPC 访问。
 
 ## 接口文档
 
@@ -123,26 +123,37 @@ cargo run --release -- --service --host 127.0.0.1 --port 1234
 
 ## 测试示例
 
-### 使用 netcat 发送请求
+### 使用 curl 通过 HTTP /rpc 发送请求
 
 1. 启动服务：
+
 ```bash
-cargo run --release -- --service
+cargo run --release -- --service --host 127.0.0.1 --port 1234
 ```
 
-2. 在另一个终端发送请求（原始 TCP JSON-RPC，而非 HTTP）：
+2. 在另一个终端通过 HTTP `POST /rpc` 发送请求：
+
 ```bash
-nc 127.0.0.1 1234
-{"jsonrpc":"2.0","id":1,"method":"scan.start","params":{"root_path":"/tmp","threads":1,"min_size":0,"exclude_patterns":[],"stale_days":30,"limit":10}}
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","id":1,"method":"scan.start","params":{"path":"/tmp","threads":1,"min_size":0,"exclude_patterns":[],"stale_days":30,"limit":10}}' \
+  http://127.0.0.1:1234/rpc
 ```
 
-3. 接收响应：
+3. 示例响应：
+
 ```json
-{"jsonrpc":"2.0","id":null,"result":{"task_id":"123e4567-e89b-12d3-a456-426614174000"},"error":null}
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {"task_id": "123e4567-e89b-12d3-a456-426614174000"},
+  "error": null
+}
 ```
 
 ## 运行测试
 
 ```bash
 cargo test
+./test_service.sh
 ```

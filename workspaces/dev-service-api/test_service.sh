@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# dev-service-api 集成测试脚本
-# 启动服务，发送示例请求，验证响应
+# dev-service-api 集成测试脚本（HTTP + JSON-RPC）
+# 启动服务，使用 HTTP POST /rpc 发送示例请求，验证响应
 
 set -e
 
@@ -14,36 +14,34 @@ SERVICE_BIN="./target/release/surf-service"
 HOST="127.0.0.1"
 PORT="1234"
 
-# 简单的 JSON-RPC 请求发送工具：优先使用 nc，不存在时回退到 python3
+# 简单的 JSON-RPC 请求发送工具：优先使用 curl，不存在时回退到 python3
 send_rpc() {
     local request="$1"
 
-    if command -v nc >/dev/null 2>&1; then
-        # 使用 nc 发送单次请求并等待响应
-        printf '%s' "$request" | nc "$HOST" "$PORT"
+    if command -v curl >/dev/null 2>&1; then
+        # 使用 curl 通过 HTTP POST /rpc 发送 JSON-RPC 请求
+        curl -s -X POST \
+            -H "Content-Type: application/json" \
+            --data "$request" \
+            "http://$HOST:$PORT/rpc"
     elif command -v python3 >/dev/null 2>&1; then
         python3 - "$HOST" "$PORT" "$request" << 'PY'
-import socket
+import http.client
 import sys
 
 host = sys.argv[1]
 port = int(sys.argv[2])
 request = sys.argv[3].encode('utf-8')
 
-with socket.create_connection((host, port), timeout=5) as s:
-    s.sendall(request)
-    s.shutdown(socket.SHUT_WR)
-    chunks = []
-    while True:
-        data = s.recv(4096)
-        if not data:
-            break
-        chunks.append(data)
-
-sys.stdout.buffer.write(b"".join(chunks))
+conn = http.client.HTTPConnection(host, port, timeout=5)
+headers = {"Content-Type": "application/json"}
+conn.request("POST", "/rpc", body=request, headers=headers)
+resp = conn.getresponse()
+sys.stdout.buffer.write(resp.read())
+conn.close()
 PY
     else
-        echo "错误: 未找到 nc 或 python3，无法发送 JSON-RPC 请求" >&2
+        echo "错误: 未找到 curl 或 python3，无法发送 HTTP JSON-RPC 请求" >&2
         return 1
     fi
 }

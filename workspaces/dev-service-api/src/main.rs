@@ -1,12 +1,18 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Router;
 use clap::{CommandFactory, Parser};
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use surf_core::{ScanRequest, ScanResult, ScanState, Scanner};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -62,6 +68,11 @@ struct TaskInfo {
 
 // 共享任务存储
 type TaskStore = Arc<RwLock<HashMap<String, TaskInfo>>>;
+
+#[derive(Clone)]
+struct AppState {
+    task_store: TaskStore,
+}
 
 // scan.start 参数
 #[derive(Debug, Deserialize)]
@@ -382,7 +393,78 @@ async fn handle_request(
     // 遵循 JSON-RPC 2.0 规范：回显请求 id
     response.id = req_id;
 
-    Ok(response)
+	Ok(response)
+}
+
+/// 统一的 JSON-RPC 字节流调度函数
+///
+/// - 入参：原始请求体字节（来自 HTTP body 或未来的 TCP 字节流）
+/// - 出参：序列化后的 JSON-RPC Response 字节
+async fn handle_jsonrpc(payload: &[u8], task_store: TaskStore) -> Vec<u8> {
+    // 尝试按 UTF-8 解码请求体
+    let req_str = match String::from_utf8(payload.to_vec()) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Value::Null,
+                result: None,
+                error: Some(JsonRpcError::new(
+                    -32700,
+                    &format!("Parse error: {}", e),
+                )),
+            };
+            return serde_json::to_vec(&err).unwrap();
+        }
+    };
+
+    // 解析 JSON-RPC 请求对象
+    let req: JsonRpcRequest = match serde_json::from_str(&req_str) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Value::Null,
+                result: None,
+                error: Some(JsonRpcError::new(
+                    -32700,
+                    &format!("Parse error: {}", e),
+                )),
+            };
+            return serde_json::to_vec(&err).unwrap();
+        }
+    };
+
+    // 调用已有的 JSON-RPC 业务分发函数
+    let resp = match handle_request(req, task_store).await {
+        Ok(r) => r,
+        Err(e) => JsonRpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Value::Null,
+            result: None,
+            error: Some(JsonRpcError::new(
+                -32603,
+                &format!("Internal error: {}", e),
+            )),
+        },
+    };
+
+    serde_json::to_vec(&resp).unwrap()
+}
+
+/// HTTP `/rpc` 入口处理函数：接收 HTTP 请求体并转交给统一的 JSON-RPC 调度层
+async fn http_rpc_handler(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let bytes = body.to_vec();
+    let resp_bytes = handle_jsonrpc(&bytes, state.task_store.clone()).await;
+
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        resp_bytes,
+    )
 }
 
 /// 命令行参数解析
@@ -418,79 +500,24 @@ async fn main() -> Result<()> {
 
     let task_store = Arc::new(RwLock::new(HashMap::new()));
 
-    println!("Surf JSON-RPC Server listening on {}:{}", args.host, args.port);
+    let state = AppState {
+        task_store: task_store.clone(),
+    };
 
-    let addr = format!("{}:{}", args.host, args.port);
+    let app = Router::new()
+        .route("/rpc", post(http_rpc_handler))
+        .with_state(state);
+
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    println!(
+        "Surf JSON-RPC HTTP Server listening on http://{}:{}/rpc",
+        args.host, args.port
+    );
+
     let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
-    loop {
-        let (mut socket, _) = listener.accept().await?;
-        let task_store = task_store.clone();
-
-        tokio::spawn(async move {
-            let mut buf = [0; 4096];
-            loop {
-                match socket.read(&mut buf).await {
-                    Ok(0) => {
-                        // 连接关闭
-                        break;
-                    }
-                    Ok(n) => {
-                        let data = &buf[..n];
-                        let req_str = match String::from_utf8(data.to_vec()) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let err = JsonRpcResponse {
-                                    jsonrpc: "2.0".to_string(),
-                                    id: Value::Null,
-                                    result: None,
-                                    error: Some(JsonRpcError::new(-32700, &format!("Parse error: {}", e))),
-                                };
-                                let err_json = serde_json::to_string(&err).unwrap();
-                                let _ = socket.write_all(err_json.as_bytes()).await;
-                                break;
-                            }
-                        };
-
-                        println!("Received request: {}", req_str.trim());
-
-                        let req: JsonRpcRequest = match serde_json::from_str(&req_str) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                let err = JsonRpcResponse {
-                                    jsonrpc: "2.0".to_string(),
-                                    id: Value::Null,
-                                    result: None,
-                                    error: Some(JsonRpcError::new(-32700, &format!("Parse error: {}", e))),
-                                };
-                                let err_json = serde_json::to_string(&err).unwrap();
-                                let _ = socket.write_all(err_json.as_bytes()).await;
-                                continue;
-                            }
-                        };
-
-                        let resp = match handle_request(req, task_store.clone()).await {
-                            Ok(r) => r,
-                            Err(e) => JsonRpcResponse {
-                                jsonrpc: "2.0".to_string(),
-                                id: Value::Null,
-                                result: None,
-                                error: Some(JsonRpcError::new(-32603, &format!("Internal error: {}", e))),
-                            },
-                        };
-
-                        let resp_json = serde_json::to_string(&resp).unwrap();
-                        println!("Sending response: {}", resp_json);
-                        let _ = socket.write_all(resp_json.as_bytes()).await;
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from socket: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-    }
+    Ok(())
 }
 
 #[cfg(test)]
