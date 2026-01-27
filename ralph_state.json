@@ -1,12 +1,12 @@
 {
   "phase": "delivery",
-  "iteration": 17,
-  "reason": "本轮复核交付状态：delivery-runner 测试日志显示全部通过，failures.md 为空；release/ 目录产物齐备，维持交付完成与闭环状态，暂不需调度后续节点。",
+  "iteration": 19,
+  "reason": "已由 requirements-manager 在 human.md 写入 GUI-01/02/03 人工测试待办，等待人类在本地 macOS GUI 环境执行并回填结果，交付阶段暂保持。",
   "notes": [
-    "交付测试：workspaces/delivery-runner/test/test-log.md 显示 TC-CLI-A/B/C 均通过",
-    "失败用例：workspaces/delivery-runner/test/failures.md 为空",
-    "发布产物：workspaces/delivery-runner/release/ 目录存在 cli/surf、lib/libsurf_core.* 等",
-    "设计约定已兑现：Architecture.md 4.4.1 指定的 HTTP + JSON-RPC 主路径完成与 GUI 联调",
-    "下一步：如需进一步发布或部署，请基于 release/ 下产物执行人工验收与分发"
+    "交付文档：release/README.md 已新增 GUI 使用说明章节（运行依赖、启动指引、开发模式、打包提示、故障排查）",
+    "交付测试：test/case.md 新增 GUI-01/02/03；run-tests.sh 已挂接并在 test-log.md 标记为 SKIP(MANUAL)",
+    "CLI 测试：workspaces/delivery-runner/test/test-log.md 显示 TC-CLI-A/B/C 均通过；failures.md 为空",
+    "发布产物：workspaces/delivery-runner/release/ 目录仍以 CLI/核心库为主；service 二进制如未内置，README 指向 dev-service-api 工作区产物",
+    "新增人类待办：requirements-manager 已在 human.md 写入 GUI-01/02/03 人工测试执行清单（环境要求、步骤、预期、结果回填）"
   ]
 }
