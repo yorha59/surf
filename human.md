@@ -174,7 +174,24 @@
   - Xcode Command Line Tools：已安装，用于后续 DMG 构建等相关工具链支持。
   - 系统工具：内置 hdiutil 可用。
 - 建议操作步骤（人类）：
-  1. 执行 `rustup update stable` 升级 Rust 工具链，升级完成后运行 `rustc --version`，确认版本号 >= 1.88.0。
-  2. 如尚未安装 Xcode Command Line Tools，执行 `xcode-select --install` 并按提示完成安装；如已安装可跳过此步骤。
-  3. 环境升级完成后，在仓库根目录进入 `workspaces/dev-macos-gui`，按照该目录下 README 或现有脚本说明执行构建命令（当前建议命令：`npm install && npm run tauri build`），并在成功构建后完成一次 macOS GUI 端到端自测。
-- 人类决策: ...
+  1. 执行 `rustup update stable` 升级 Rust 工具链，升级完成后运行 `rustc --version`，确认版本号 >= 1.88.0，并记录一行完整输出作为证据（例如 `rustc 1.88.0 (… commit …)`）。
+  2. 确认 Xcode Command Line Tools 状态：
+     - 如尚未安装，执行 `xcode-select --install` 并按提示完成安装；
+     - 如已安装，可通过 `xcode-select --version` 或 `xcode-select -p` 确认可用，并保留一行输出作为证据。
+  3. 确认系统自带 `hdiutil` 可用，例如执行 `which hdiutil`（或直接执行一次 `hdiutil help`），记录返回路径或成功输出作为证据。
+  4. 环境升级与检查完成后，在仓库根目录进入 `workspaces/dev-macos-gui`，按照该目录下 README 或现有脚本说明执行构建命令，当前建议顺序：
+     - 如首次或依赖有变更：`npm install`；
+     - 先执行一次后端快速检查：`cargo check --manifest-path src-tauri/Cargo.toml`；
+     - 再执行完整构建：`npm run tauri build`；
+     - 至少完成一次 macOS GUI 端到端自测（以当前 Architecture/PRD 所描述的 HTTP `/rpc` 主路径为准），无需在此重复记录具体业务用例。
+  5. 如在上述步骤中遇到无法解决的问题，请在本条目下补充简要问题描述与错误信息摘要，方便后续由编排回退到合适节点处理。
+- 验收与证据要求：
+  - 人类在本机完成 ENV-01 所述环境升级与验证后，应在本条目的「人类决策:」行中给出最终结论，推荐格式：
+    - `人类决策: DONE@rustc 1.88.0, Xcode CLT ok, hdiutil ok, date=YYYY-MM-DD, evidence=<日志/截图路径>`
+  - 建议至少包含以下证据要素（可通过附加文本摘录或文件/截图路径的方式给出）：
+    - 一行 `rustc --version` 的完整输出；
+    - 一行 `xcode-select --version` 或 `xcode-select -p` 的输出；
+    - 一行 `which hdiutil`（或等价命令）的输出；
+    - 一次成功执行 `cargo check --manifest-path src-tauri/Cargo.toml` 或 `npm run tauri build` 的日志摘要或文件路径（例如指向本地构建日志或截图）。
+- 人类决策: TODO（建议在完成上述环境升级与验证后，将本行改写为例如 `人类决策: DONE@rustc 1.88.0, Xcode CLT ok, hdiutil ok, date=YYYY-MM-DD, evidence=...`）。
+- 完成后请在此条目的「人类决策:」行填写 DONE 并附上述证据，编排将自动推进 dev-macos-gui 的端到端自测。
