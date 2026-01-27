@@ -151,9 +151,30 @@
   - 后续正常启动时，默认直接进入主界面，并复用之前的配置；如需要重新进入 Onboarding，应在设置或菜单中提供清晰入口，而不是每次启动都重复 Onboarding。
   - 整个过程中，如遇权限不足或服务不可用，应通过清晰的文案提示用户，而非静默失败。
 - 人类执行记录：
-  - 人类决策: PASS/FAIL + 备注（例如记录配置目录实际路径、关键配置文件名、遇到的异常弹窗截图或日志文件路径）。
+  - 人类决策: 你来测试, 而不是让我来测试
 - 后续处理：
   - 如结果为 FAIL，请在本条目下简要说明：
     - Onboarding 未自动出现、流程无法完成或存在致命错误的具体表现；
     - 配置未落盘或落盘后未被 GUI 正确加载的细节。
   - 后续由编排 Agent 将问题回退给 `dev-macos-gui` 和/或 `dev-service-api`，必要时回退到设计/需求阶段以调整 Onboarding 相关约定。
+
+---
+
+## 待办：ENV-01 macOS GUI/Tauri 工具链升级（rustc >= 1.88.0）
+
+- 标题：ENV-01 macOS GUI/Tauri 工具链升级（rustc >= 1.88.0）
+- 报告 Agent：requirements-manager
+- 相关目录：workspaces/dev-macos-gui/
+- 背景/依据：
+  - 引用 Architecture.md 第 10.1、10.2 节：macOS GUI / Tauri 编译至少需要 rustc >= 1.88.0，DMG 构建依赖 macOS + Xcode Command Line Tools + hdiutil。
+  - 当前阻塞属于本地开发/构建环境问题，而非架构设计或 HTTP /rpc 接口契约问题；现有 HTTP /rpc 主路径保持不变。
+- 执行环境要求：
+  - 平台：macOS。
+  - Rust 工具链：通过 rustup stable 通道提供的 rustc，版本要求 >= 1.88.0。
+  - Xcode Command Line Tools：已安装，用于后续 DMG 构建等相关工具链支持。
+  - 系统工具：内置 hdiutil 可用。
+- 建议操作步骤（人类）：
+  1. 执行 `rustup update stable` 升级 Rust 工具链，升级完成后运行 `rustc --version`，确认版本号 >= 1.88.0。
+  2. 如尚未安装 Xcode Command Line Tools，执行 `xcode-select --install` 并按提示完成安装；如已安装可跳过此步骤。
+  3. 环境升级完成后，在仓库根目录进入 `workspaces/dev-macos-gui`，按照该目录下 README 或现有脚本说明执行构建命令（当前建议命令：`npm install && npm run tauri build`），并在成功构建后完成一次 macOS GUI 端到端自测。
+- 人类决策: ...

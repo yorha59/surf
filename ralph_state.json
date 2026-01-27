@@ -1,12 +1,12 @@
 {
-  "phase": "design",
-  "iteration": 23,
-  "reason": "设计阶段补充：在 Architecture.md 新增工具链与构建环境要求（macOS GUI/Tauri 需 rustc >= 1.88.0；DMG 构建需 macOS + Xcode CLT + hdiutil），保持 HTTP /rpc 契约不变；建议由 requirements-manager 在 human.md 写入环境升级待办以解除 dev-macos-gui 阻塞。",
+  "phase": "development",
+  "iteration": 24,
+  "reason": "设计补充已完成（Architecture.md 已明确工具链与构建环境要求），本轮已由 requirements-manager 在 human.md 新增 ENV-01：macOS 环境升级（rustc >= 1.88.0）待办以解除 dev-macos-gui 阻塞；现处于开发阶段，等待环境升级后由 dev-macos-gui 完成端到端自测，随后再推进到交付阶段。",
   "notes": [
-    "阻塞：dev-macos-gui 当前环境 rustc 1.86.0，无法完成 Tauri 端到端自测；需在 macOS 环境升级到 rustc >= 1.88.0",
+    "阻塞：dev-macos-gui 当前环境 rustc 1.86.0，无法完成 Tauri 端到端自测；需在 macOS 环境升级到 rustc >= 1.88.0（human.md 已新增 ENV-01）",
     "dev-service-api：本轮已完成且自测通过（HTTP POST /rpc 方法族齐备）",
     "dev-core-scanner：核心扫描/并行/类型统计/TopN/陈旧识别均完成并通过自测",
     "dev-cli-tui：CLI/TUI 基本能力与自测完成",
-    "全局阶段建议：待 GUI 在满足工具链要求的环境中完成端到端自测并在工作区落盘完成声明后，再整体推进到交付阶段"
+    "保持 HTTP /rpc 契约不变；待 GUI 在满足工具链要求的环境中完成端到端自测并在工作区落盘完成声明后，再整体推进到交付阶段"
   ]
 }
