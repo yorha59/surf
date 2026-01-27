@@ -1,15 +1,21 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Surf",
-  "version": "0.1.0",
-  "identifier": "dev.surf",
+  "package": {
+    "productName": "Surf",
+    "version": "0.1.0"
+  },
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
     "devPath": "http://localhost:5173",
     "distDir": "../dist"
   },
-  "app": {
+  "tauri": {
+    "allowlist": {
+      "shell": {
+        "all": true
+      }
+    },
     "windows": [
       {
         "title": "Surf",
@@ -18,17 +24,17 @@
         "resizable": true,
         "fullscreen": false
       }
-    ]
-  },
-  "bundle": {
-    "active": true,
-    "identifier": "dev.surf",
-    "macOS": {
-      "entitlements": null,
-      "exceptionDomain": "localhost",
-      "frameworks": [],
-      "minimumSystemVersion": "10.13",
-      "signingIdentity": null
+    ],
+    "bundle": {
+      "active": true,
+      "identifier": "dev.surf",
+      "macOS": {
+        "entitlements": null,
+        "exceptionDomain": "localhost",
+        "frameworks": [],
+        "minimumSystemVersion": "10.13",
+        "signingIdentity": null
+      }
     }
   }
 }

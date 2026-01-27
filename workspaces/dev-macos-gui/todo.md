@@ -1,6 +1,8 @@
 # dev-macos-gui 本轮开发任务（todo）
 
-**本轮状态：本轮阻塞（环境）**  
+- [x] GUI 端到端联调通过，rustc>=1.88.0（当前环境：rustc 1.93.0，Tauri `cargo check`/`cargo build` 与 `npm run tauri:build` 均已完成）
+
+**本轮状态（上一轮记录，保留）：本轮阻塞（环境）**  
 - 当前 rustc 版本：`rustc 1.86.0`（< 1.88.0，Tauri 后端需 `rustc >= 1.88.0`，参见 Architecture.md 10.1）；  
 - 受影响命令：`cargo check --manifest-path src-tauri/Cargo.toml`、`cargo build`、`npm run tauri:dev`、`npm run tauri:build` 等依赖 Tauri 宿主编译的命令；  
 - 现有前端 Vite + `/rpc` 代理联调能力与历史自测记录保持有效（详见下文“自测记录”段落）。

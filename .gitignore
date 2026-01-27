@@ -18,6 +18,7 @@ __pycache__/
 
 # Rust/Cargo 构建目录（各子工程）
 workspaces/*/target/
+workspaces/**/target/
 
 # 前端常见构建产物（macOS GUI 子工程）
 workspaces/dev-macos-gui/node_modules/

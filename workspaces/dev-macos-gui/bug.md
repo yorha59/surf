@@ -25,4 +25,28 @@
   导致 `cargo check --manifest-path src-tauri/Cargo.toml` 及依赖 Tauri 宿主编译的命令（如 `cargo build`、
   `npm run tauri:dev`、`npm run tauri:build`）无法通过，本轮开发在 Tauri 宿主层面受阻。
 
-- 状态：待环境升级 / 兼容性确认
+- 状态：已解决（当前环境已升级至 `rustc 1.93.0`，`cargo check`/`cargo build` 与 `npm run tauri:build` 均能在本机通过，保留本条作为历史记录）
+
+## 2026-01-27 · Tauri DMG 打包脚本 bundle_dmg.sh 失败（Surf.app 已生成）
+
+- 标题：`npm run tauri:build` 在执行 `bundle_dmg.sh` 时失败，但 Surf.app 已成功生成
+- 现象与复现步骤：
+  - 在仓库根目录下执行：
+    - `cd workspaces/dev-macos-gui`
+    - `npm run tauri:build`
+  - 终端输出关键片段：
+    - `Bundling Surf.app (.../workspaces/dev-macos-gui/src-tauri/target/release/bundle/macos/Surf.app)`
+    - `Bundling Surf_0.1.0_aarch64.dmg (.../workspaces/dev-macos-gui/src-tauri/target/release/bundle/dmg/Surf_0.1.0_aarch64.dmg)`
+    - `Running bundle_dmg.sh`
+    - `Error failed to bundle project: error running bundle_dmg.sh`
+- 期望行为 vs 实际行为：
+  - 期望：`npm run tauri:build` 在本地 macOS 环境中能够完成 Surf.app 构建，并成功生成可分发的 DMG 安装镜像；
+  - 实际：Surf.app 已成功生成，DMG 在执行自定义脚本 `bundle_dmg.sh` 阶段失败，导致命令整体返回非零退出码。
+- 初步分析与修复方案：
+  - 该问题集中在 DMG 打包脚本层面，对本地开发与测试可直接运行的 Surf.app 影响有限；
+  - 建议后续由交付/打包节点检查 `bundle_dmg.sh` 的具体实现，确认：
+    - 脚本是否依赖额外的打包工具或权限（如 `hdiutil`、自定义签名命令等）；
+    - 是否需要为 CI/本地环境单独提供简化版打包流程，或仅在正式发布环境执行完整 DMG 生成。
+- 当前结论：
+  - 对本轮“在 rustc>=1.88.0 前提下完成 Tauri 后端编译与 GUI 端到端自测”的目标不构成阻塞；
+  - Surf.app 已在 `src-tauri/target/release/bundle/macos/Surf.app` 生成，可以用于后续交付节点的手工验证与签名实验。
