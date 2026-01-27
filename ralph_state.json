@@ -1,14 +1,15 @@
 {
-  "phase": "development",
-  "iteration": 27,
-  "reason": "本轮调度 dev-macos-gui 进行端到端自测：其工作区已落盘‘本轮阻塞（环境）’，实际 rustc 为 1.86.0，低于 Architecture.md 10.1 对 Tauri 的最低要求（>=1.88.0）；依据状态机与向上反馈规则，整体继续停留在开发阶段，并记录回退请求，下一轮将回退到设计阶段协调环境升级与人类协作。",
+  "phase": "design",
+  "iteration": 28,
+  "reason": "从开发回退到设计阶段：dev-macos-gui 因 rustc 1.86.0 低于 Architecture.md 第 10.1 节最低要求（>=1.88.0）导致构建受阻；设计节点确认该问题属于环境/工具链依赖，不涉及架构或接口调整，HTTP /rpc 主路径保持不变，并建议由 requirements-manager 将‘环境升级’事项写入 human.md（人类执行 rustup update stable 并确认 rustc >= 1.88.0）。",
   "notes": [
-    "dev-macos-gui：在 workspaces/dev-macos-gui/todo.md 顶部写入‘本轮阻塞（环境）’，并在 bug.md 记录 Tauri 需 rustc >=1.88.0",
-    "当前 rustc --version = 1.86.0，src-tauri 构建/运行受阻；Vite + /rpc 联调路径保持可用且已有 e2e-tc1.png 证据",
-    "拟回退：按向上反馈链条回退到设计阶段，由 design-architect 评估并转交 requirements-manager 写入 human.md 的环境升级事项（rustc >= 1.88.0）",
+    "design-architect：确认阻塞为环境问题，Architecture.md 保持不变（第 10.1/10.2 已给出升级与 CI 要求）",
+    "后续动作：调度 requirements-manager 在 human.md 写入环境升级条目，待人类升级完成后再回到开发阶段推动 dev-macos-gui 端到端自测",
+    "dev-macos-gui：工作区已记录‘本轮阻塞（环境）’与 Tauri 需 rustc >=1.88.0",
+    "当前 rustc --version = 1.86.0；Vite + /rpc 联调路径可用（已有 e2e-tc1.png）",
     "dev-service-api：已完成且自测通过（HTTP POST /rpc 方法族齐备）",
     "dev-core-scanner：核心扫描/并行/类型统计/TopN/陈旧识别均完成并通过自测",
     "dev-cli-tui：CLI/TUI 基本能力与自测完成",
-    "保持 HTTP /rpc 主路径契约不变；待 GUI 在满足工具链要求的环境中完成 Tauri 端到端自测后再整体推进到交付阶段"
+    "总体策略：保持 HTTP /rpc 主路径契约不变，待人类完成工具链升级后继续推进 GUI"
   ]
 }
