@@ -1,11 +1,11 @@
 {
-  "phase": "delivery",
-  "iteration": 10,
-  "reason": "交付阶段已触发并在交付工作区完成独立测试：核心库 + CLI/TUI 构建与汇总成功；用例 A/B/C 全部通过；服务与 GUI 未纳入本轮范围。",
+  "phase": "development",
+  "iteration": 11,
+  "reason": "进入开发阶段：已调度 dev-service-api，完成 JSON-RPC 服务骨架与自测；仍需等待 dev-macos-gui 完成后再整体推进交付。",
   "notes": [
-    "release 产物：workspaces/delivery-runner/release/cli/surf, release/lib/libsurf_core.rlib/.d",
-    "测试用例：A（tc3.* JSON 结构与统计一致）、B（min-size+limit 行为正确）、C（错误参数与不存在路径返回非零退出码）",
-    "test/failures.md 为空，本轮无失败用例",
-    "下一步建议：启动 dev-service-api 与 dev-macos-gui 的开发并纳入后续交付范围"
+    "dev-core-scanner 与 dev-cli-tui 已在上一轮交付工作区通过独立测试",
+    "dev-service-api 本轮实现：tokio TCP JSON-RPC、scan.start/status/result/cancel 方法；自测通过（cargo test 与 test_service.sh）",
+    "建议：在全部开发 Agent 完成后统一进入交付阶段做整体验收；当前仍缺 dev-macos-gui",
+    "工作区参考：workspaces/dev-service-api/src/main.rs, tests/integration.rs, test_service.sh, README.md, todo.md"
   ]
 }
