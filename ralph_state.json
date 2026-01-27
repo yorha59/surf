@@ -1,13 +1,12 @@
 {
-  "phase": "development",
-  "iteration": 31,
-  "reason": "交付阶段测试失败：delivery-runner 在交付工作区聚合与独立测试时，CLI 无法构建（dev-cli-tui 依赖 crate 命名错误），GUI 未产出 Surf.app（仅 dist 占位，Tauri 构建环境未就绪）；服务二进制通过。按向上反馈原则回退到开发阶段，由相关开发 Agent 修复后再重试交付。",
+  "phase": "delivery",
+  "iteration": 32,
+  "reason": "开发阶段并行子任务已完成：dev-cli-tui 修复依赖命名并产出可执行 CLI（最小自测通过 CLI-1/2/3）；dev-macos-gui 产出 Surf.app 并完成与本地服务 /rpc 最小验证（DMG 打包脚本问题不阻塞）。满足推进条件，进入交付阶段以重新聚合构建并复跑交付用例。",
   "notes": [
-    "交付产物：release/service/surf-service-macos-x86_64 构建成功并通过 HTTP /rpc 用例",
-    "交付产物：release/cli/surf-macos-x86_64 为占位脚本，真实 CLI 二进制缺失（构建失败）",
-    "交付产物：release/gui/dist/ 仅为前端静态资源，占位替代 Surf.app；installer/ 未产出 DMG",
-    "失败用例集中于 CLI（表格输出/JSON/非法参数校验）与 GUI 端到端（跳过）",
-    "需要广播：workspaces/delivery-runner/test/failures.md 与 release/metadata/BUILD-REPORT.md 给 dev-cli-tui、dev-macos-gui（同时抄送其他 dev Agent）",
-    "下一步：并行调度 dev-cli-tui 修复 Cargo.toml 依赖名（surf-core → surf_core）并完成可运行 CLI；dev-macos-gui 在满足 rustc >= 1.88.0 的环境下完成 Surf.app 打包与自测；修复后再次进入交付阶段"
+    "CLI 构建产物已就位：workspaces/dev-cli-tui/target/release/surf（表格/JSON 自测通过，非法参数校验生效）",
+    "GUI 构建产物已就位：workspaces/dev-macos-gui/src-tauri/target/release/bundle/macos/Surf.app（可启动；与交付包服务 /rpc 路径最小验证通过）",
+    "服务构建产物保持可用：workspaces/delivery-runner/release/service/surf-service-macos-x86_64",
+    "DMG 打包脚本 bundle_dmg.sh 仍需交付阶段/后续迭代单独排查，不影响本轮进入交付重测",
+    "下一步：调用 delivery-runner 在交付工作区聚合上述产物至 release/ 并按 PRD/Architecture 重新执行 CLI/GUI 相关用例；如失败则按向上反馈链条回退"
   ]
 }

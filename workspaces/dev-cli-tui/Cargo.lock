@@ -657,12 +657,12 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
- "surf-core",
+ "surf_core",
  "thiserror",
 ]
 
 [[package]]
-name = "surf-core"
+name = "surf_core"
 version = "0.1.0"
 dependencies = [
  "glob",

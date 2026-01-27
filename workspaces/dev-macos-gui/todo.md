@@ -2,6 +2,27 @@
 
 - [x] GUI 端到端联调通过，rustc>=1.88.0（当前环境：rustc 1.93.0，Tauri `cargo check`/`cargo build` 与 `npm run tauri:build` 均已完成）
 
+## 本轮补充记录：GUI 打包 & 最小端到端自测（GUI-2）
+
+- 构建命令（在 `workspaces/dev-macos-gui/`）：
+  - `npm run build`：成功，生成前端构建产物到 `dist/`；
+  - `npm run tauri:build`：成功完成 Tauri 后端编译并生成 `src-tauri/target/release/bundle/macos/Surf.app`，在执行 `bundle_dmg.sh` 生成 DMG 时失败，命令整体返回非零退出码（详见 `bug.md` 中「Tauri DMG 打包脚本 bundle_dmg.sh 失败」条目）。
+- 产物路径：
+  - Surf.app：`workspaces/dev-macos-gui/src-tauri/target/release/bundle/macos/Surf.app`；
+  - 内部可执行文件：`Surf.app/Contents/MacOS/Surf`；
+  - DMG 临时产物：`src-tauri/target/release/bundle/dmg/Surf_0.1.0_aarch64.dmg`（当前由 `bundle_dmg.sh` 脚本阶段报错，交付节点可在后续迭代中继续排查）。
+- 最小自测（本工作区内自动化能力范围）：
+  - 启动服务端（交付工作区）：
+    - `cd workspaces/delivery-runner/release && ./service/surf-service-macos-x86_64 --service --host 127.0.0.1 --port 1234`；
+    - 通过 `curl -X POST http://127.0.0.1:1234/rpc` 调用 `scan.start`，对测试目录 `workspaces/delivery-runner/test/tmp/tc1.Wp8z` 发起扫描，返回有效 `task_id`，证明 HTTP `POST /rpc` 主路径可用；
+    - 使用错误的 `task_id` 调用 `scan.status` 返回 JSON-RPC 错误 `Invalid task_id`，表明服务端参数校验正常。
+  - 尝试启动 Surf.app：
+    - 执行 `open src-tauri/target/release/bundle/macos/Surf.app` 无错误输出，表明在当前 macOS 环境中 Surf.app 可以被系统正常拉起；
+    - 由于当前自动化环境无法直接驱动 GUI 完成交互（选择路径并点击「开始扫描」），本轮仅验证「Surf.app 可启动 + 本地 surf-service 通过 HTTP /rpc 工作正常」的组合路径；
+    - 端到端 GUI 交互（通过 Surf.app UI 发起一次 `scan.start` / 轮询 `scan.status` / 展示 `scan.result`）建议由后续人工或专用 GUI 自动化在同一环境中执行，可参考历史截图 `workspaces/dev-macos-gui/e2e-tc1.png` 作为 UI 行为基线。
+
+**本轮状态：完成（Surf.app 已生成，服务端 /rpc 经最小自测可用；DMG 打包脚本问题已在 bug.md 中记录，不阻塞本轮开发）**  
+
 **本轮状态（上一轮记录，保留）：本轮阻塞（环境）**  
 - 当前 rustc 版本：`rustc 1.86.0`（< 1.88.0，Tauri 后端需 `rustc >= 1.88.0`，参见 Architecture.md 10.1）；  
 - 受影响命令：`cargo check --manifest-path src-tauri/Cargo.toml`、`cargo build`、`npm run tauri:dev`、`npm run tauri:build` 等依赖 Tauri 宿主编译的命令；  

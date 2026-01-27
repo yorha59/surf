@@ -66,7 +66,7 @@
 
 ### 8. 文档与构建说明
 - [ ] 编写 README.md，说明如何构建和运行
-- [ ] 确保二进制产物为 `target/release/surf`
+- [x] 确保二进制产物为 `target/release/surf`
 - [ ] 提供简单使用示例
 
 ## 完成判定标准
@@ -84,3 +84,9 @@
 ## 自测记录（2026-01-26）
 - 命令：`./target/debug/surf --path ./workspaces/delivery-runner/test/tmp/tc3.Eqte --limit 5 --json`
 - 结果：扫描完成，`total_files=4`，`total_size_bytes=491520`，`top_files` 按大小降序，`by_extension=[{"bin",4,491520}]`，无陈旧文件；参数验证与错误提示已在 CLI 层生效。
+
+## 自测记录（2026-01-27）
+- 构建：`cargo build --release --manifest-path workspaces/dev-cli-tui/Cargo.toml`（成功，生成 `workspaces/dev-cli-tui/target/release/surf`）
+- CLI-1 表格输出：`workspaces/dev-cli-tui/target/release/surf --path workspaces/delivery-runner/test/tmp/tc1.Wp8z --limit 5`（成功，表格输出包含 3 个文件，按大小降序，按扩展名聚合统计正确）
+- CLI-2 JSON 输出：`workspaces/dev-cli-tui/target/release/surf --path workspaces/delivery-runner/test/tmp/tc1.Wp8z --limit 5 --json`（成功，JSON 顶层包含 `summary`/`top_files`/`by_extension`/`stale_files` 字段，字段语义与 Architecture 6.1 一致）
+- CLI-3 参数校验：`workspaces/dev-cli-tui/target/release/surf --path workspaces/delivery-runner/test/tmp/tc1.Wp8z --limit 0`（退出码 1，stderr 输出 `参数 --limit 必须为正整数`，符合非法参数期望行为）
