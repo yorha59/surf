@@ -17,4 +17,11 @@
 
 待人类决策：
 
+```
+- 问题: macOS GUI/Tauri 构建阻塞，当前 rustc=1.86.0 低于最低要求 1.88.0
+  报告Agent: requirements-manager
+  需人类决策: 在本机/CI 将 Rust 稳定版工具链升级至 >=1.88.0；执行命令 `rustup update stable` 并确认 `rustc --version` 显示 >=1.88.0；是否同意作为全仓统一最低版本约束用于后续 GUI/交付构建
+  人类决策: 
+```
+
 （此处按上方模板逐条填写；处理完成的条目由 Coco 删除。）
