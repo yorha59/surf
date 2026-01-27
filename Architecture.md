@@ -49,7 +49,13 @@
    - 并发模型：
      - 文件系统遍历与 CPU 密集计算：建议基于 `rayon` 或线程池模型实现多线程扫描；
      - 服务模式与 IO：建议基于 `tokio` 提供异步网络与 JSON-RPC 处理。
-   - 通信协议：JSON-RPC 2.0（TCP，默认监听 `127.0.0.1:1234`）。
+   - 通信协议与传输层：
+     - 统一应用层协议为 **JSON-RPC 2.0**；
+     - **主路径（当前版本）**：HTTP + JSON-RPC 2.0，服务以 `POST /rpc` 形式在 `http://<host>:<port>` 暴露接口（默认 `http://127.0.0.1:1234/rpc`），供 macOS GUI 以及其他 HTTP 客户端使用；
+     - **兼容路径（可选扩展）**：原始 TCP JSON-RPC 2.0，服务可在同一进程中额外暴露一个 TCP 监听端点（仍建议绑定在 `127.0.0.1` 上的端口），供 CLI/TUI 或其他需要更轻量本地接入的客户端直接复用 TCP 通道；
+     - HTTP 与 TCP 监听共享同一套 JSON-RPC 方法调度层（见第 6.2 节），在方法族与数据结构层面保持完全一致，仅传输层不同。
+
+> 说明：PRD 第 6 节仅要求提供“基于 `tokio` 的轻量 JSON-RPC 2.0 服务”，并未限定传输层是纯 TCP 还是 HTTP。本设计将默认暴露方式细化为“HTTP + JSON-RPC（主路径）+ 原始 TCP JSON-RPC（兼容路径）”，属于实现层设计细化，不需要同步修改 PRD，仅在本节与第 4.2、6.2 节中记录具体约定。
 
 2. **命令行 / TUI**
    - CLI 参数解析：`clap` 系列库（或等价方案）。
@@ -129,6 +135,21 @@
    - 记录服务端的历史任务和配置（例如默认扫描参数）；
    - 为 GUI 提供任务列表与历史查询接口（可通过扩展的 JSON-RPC 方法实现）。
 
+**传输层形态与端口约定：**
+
+1. 服务二进制（规划名：`surf-service`）在 `--service` 模式下，至少提供一个 HTTP 监听端点：
+   - 形态：`POST /rpc`；
+   - 地址：`http://<host>:<port>/rpc`，其中 `<host>`、`<port>` 由命令行 `--host` / `--port` 控制（默认 `127.0.0.1:1234`）。
+
+2. 为兼容原始 TCP JSON-RPC 客户端，服务可在同一进程内额外暴露一个 TCP 监听端点：
+   - 形态：原始 TCP 连接上传输 JSON-RPC 2.0 请求/响应帧；
+   - 地址：建议同样绑定在 `127.0.0.1` 上的端口，具体端口是否与 HTTP 共用或分离可在实现阶段通过内部配置或后续扩展参数细化，本轮设计仅要求 **不会改变现有 `--host` / `--port` 的对外语义**；
+   - 该 TCP 端点与 HTTP 端点复用同一套 JSON-RPC 方法族与调度逻辑。
+
+3. 当前迭代的验收重点：
+   - **HTTP JSON-RPC 端点必须可用**，以支撑 `dev-macos-gui` 中基于 `fetch("/rpc")` 的集成路径；
+   - 是否在同一版本内同时落地原始 TCP 端点由开发阶段按工作量权衡，但架构上已预留扩展空间。
+
 **不负责的内容：**
 
 - 不直接负责终端或 GUI 渲染；
@@ -193,6 +214,28 @@
 - 不负责终端侧交互；
 - 不负责系统级安装 / 卸载逻辑（可在交付阶段补充）。
 
+#### 4.4.1 `dev-macos-gui` 集成指导（HTTP 主路径）
+
+1. 前端调用方式（当前主路径）：
+   - `workspaces/dev-macos-gui/src/services/ServiceClient.tsx` 作为 GUI 与服务之间的统一 JSON-RPC 调用封装，固定使用 `fetch("/rpc")` 以 HTTP POST 方式发送 JSON-RPC 请求；
+   - **开发模式**：Vite 开发服务器通过 `vite.config.ts` 中的 `proxy["/rpc"]` 将所有 `/rpc` 请求代理到 `http://127.0.0.1:1234/rpc`，要求 `dev-service-api` 在该地址暴露 HTTP JSON-RPC 入口；
+   - **打包后的 Tauri 应用**：前端仍通过相对路径 `fetch("/rpc")` 调用，由 Tauri 后端负责将 `/rpc` 请求转发到本机运行的 `surf-service` HTTP 端点（例如在应用启动时自动拉起 `surf-service` 子进程并监听配置中的 `<host>:<port>`）。
+
+2. 配置与用户可见行为：
+   - GUI 中的“JSON-RPC 服务器地址与端口”应直接映射到 `http://<host>:<port>/rpc`，默认值与服务模式 `--host` / `--port` 保持一致（`127.0.0.1:1234`）；
+   - 当 `/rpc` 不可用时，`ServiceClient` 需要在状态栏/TopBar 中给出清晰的连接失败提示，并引导用户检查或启动本地 JSON-RPC 服务。
+
+3. 对交付阶段的要求：
+   - `release/gui/` 下的发布说明需包含“本地 JSON-RPC 服务依赖说明”，明确 GUI 默认期望的 HTTP 入口为 `http://127.0.0.1:1234/rpc`（或用户在设置中自定义的地址）；
+   - 若发布包内附带 `surf-service` 二进制，建议在 GUI 中提供“自动启动本地服务”的开关，并在文档中说明其默认行为和可能的安全提示（仅本机监听、不对外暴露）。
+
+4. 备用方案（未来可选扩展）：
+   - 保留 `src-tauri/src/rpc_client.rs` 作为通过原始 TCP JSON-RPC 接入服务的备用路径；
+   - 如未来决定采用“GUI → Tauri `invoke` → TCP 客户端 → 服务”的链路，则：
+     - 在 Tauri 后端实现 `scan_start` / `scan_status` / `scan_result` / `scan_cancel` 等 `invoke` 命令，内部调用 `RpcClient` 完成 TCP JSON-RPC 通信；
+     - 在前端 `ServiceClient.tsx` 中将 `fetch("/rpc")` 替换为对上述 `invoke` 命令的调用；
+   - 当前迭代不要求落地该备用方案，仅在架构层面保留演进空间。
+
 ### 4.5 共享模型与配置 / 历史存储
 
 **职责：**
@@ -235,11 +278,15 @@
 ### 5.2 JSON-RPC 服务 + GUI 扫描流程
 
 1. 用户通过 GUI 发起扫描：选择目录并设置参数。
-2. GUI 将参数封装为 JSON-RPC 请求 `scan.start`，通过 TCP 发送到服务接口层。
+2. GUI 通过 `ServiceClient` 将参数封装为 JSON-RPC 请求 `scan.start`，并以 HTTP POST 方式调用 `POST /rpc`：
+   - 开发模式下，请求路径为 `fetch("/rpc")`，由 Vite 代理到 `http://127.0.0.1:1234/rpc`；
+   - 打包后的 Tauri 应用中，`fetch("/rpc")` 由 Tauri 后端转发到本机运行的 `surf-service` HTTP 端点（`http://<host>:<port>/rpc`）。
 3. 服务层创建新的扫描任务 ID，调用核心引擎异步执行扫描并立即返回 `task_id` 给 GUI。
 4. GUI 周期性调用 `scan.status` 查询进度，更新进度条与状态栏，同时可允许用户取消任务（调用 `scan.cancel`）。
-5. 扫描完成后，GUI 调用 `scan.result` 获取 `ScanResult`，用于渲染 Treemap 和列表视图。
+5. 扫描完成后，GUI 同样通过 `POST /rpc` 调用 `scan.result` 获取 `ScanResult`，用于渲染 Treemap 和列表视图。
 6. 服务层可将 `ScanResult` 摘要写入历史存储，以供 GUI 列表展示与快速重跑。
+
+> 备用链路说明：如未来切换到“GUI → Tauri `invoke` → TCP 客户端 → 服务”的方案，本节中的 HTTP 调用将由本机进程内的 TCP JSON-RPC 调用替代，但 `scan.*` 方法族与请求/返回结构保持不变。
 
 ### 5.3 删除操作（跨形态，一致策略）
 
@@ -356,6 +403,19 @@ CSV / HTML 导出格式可在后续设计中进一步补充，仅要求字段集
 - 遵循 JSON-RPC 2.0 规范，所有请求包含 `jsonrpc`、`method`、`params`、`id` 字段；
 - 错误响应使用标准 `error` 字段，`code`/`message` 语义在后续迭代中细化；
 - 本节仅定义核心方法族，后续可扩展查询历史、配置管理等辅助接口。
+
+- 传输层与 HTTP 封装：
+  - 当前版本的 **主路径** 为 HTTP + JSON-RPC：客户端通过 `POST /rpc` 调用服务端，`Content-Type: application/json`，请求体为 JSON-RPC Request 对象，响应体为 JSON-RPC Response 对象；
+  - HTTP 层的最小实现建议（面向 `dev-service-api`）：
+    - 使用 `hyper` 或 `axum` 实现一个轻量级 HTTP 服务器，监听在 `http://<host>:<port>`（默认 `127.0.0.1:1234`）；
+    - 为 `/rpc` 注册一个 POST 处理函数，将请求 body 读取为字节数组并交给已有的 JSON-RPC 调度函数，例如：`handle_jsonrpc(payload: &[u8]) -> Vec<u8>`；
+    - 无论业务成功还是失败，HTTP 层通常返回 `200 OK`，错误信息通过 JSON-RPC 的 `error` 字段表达；仅在解析层面发生严重错误（如非 JSON 请求）时返回非 2xx 状态码；
+    - HTTP 与（未来可能存在的）原始 TCP JSON-RPC 通道必须共享同一套方法族与数据结构，保证 GUI 与其他客户端在协议层面无感知差异。
+
+- 原始 TCP JSON-RPC（兼容路径）：
+  - 对于仍希望通过原始 TCP 通信的客户端，服务可以在同一进程内维护一个 TCP 监听；
+  - 建议采用“按行分隔的 JSON 文本”或“长度前缀帧”作为 framing 协议，具体细节在 `dev-service-api` 的 README 中记录即可；
+  - 所有 TCP 请求在进入核心调度前，与 HTTP 路径一样被解析为 JSON-RPC Request 对象，输出 JSON-RPC Response 对象。
 
 #### 6.2.1 `scan.start`
 
@@ -552,4 +612,3 @@ CSV / HTML 导出格式可在后续设计中进一步补充，仅要求字段集
 5. GUI 内 Treemap 与列表视图的具体视觉规范与交互微细节。
 
 后续迭代可在本初稿基础上，按模块/章节逐步补充实现级设计（例如关键数据结构字段列表、错误码表、具体导出格式等），同时根据开发与交付阶段的反馈进行调整。
-

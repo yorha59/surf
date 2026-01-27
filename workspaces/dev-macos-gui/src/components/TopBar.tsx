@@ -1,6 +1,11 @@
 import React from "react";
+import { useServiceClient } from "../services/ServiceClient";
 
 export const TopBar: React.FC = () => {
+  const { serviceState } = useServiceClient();
+  const indicatorColor = serviceState.connected ? "#22c55e" : "#f97316";
+  const indicatorLabel = serviceState.connected ? "已连接 JSON-RPC" : "未连接 JSON-RPC";
+
   return (
     <header
       style={{
@@ -20,7 +25,7 @@ export const TopBar: React.FC = () => {
             width: 10,
             height: 10,
             borderRadius: 999,
-            backgroundColor: "#22c55e"
+            backgroundColor: indicatorColor
           }}
         />
         <div>
@@ -31,6 +36,9 @@ export const TopBar: React.FC = () => {
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+        <span style={{ fontSize: "0.7rem", color: "#9ca3af" }}>
+          {indicatorLabel}
+        </span>
         <input
           type="text"
           placeholder="搜索（占位）"

@@ -1,11 +1,12 @@
 {
   "phase": "development",
-  "iteration": 12,
-  "reason": "仍处于开发阶段：已调度并完成 dev-macos-gui 的 macOS GUI 初始骨架（Tauri + React），前端构建自测通过；Rust 宿主编译受全局 rustc 版本限制。待完成 JSON-RPC 集成与端到端 GUI 流程后再统一进入交付阶段。",
+  "iteration": 13,
+  "reason": "架构阶段已补齐传输层设计：采用 HTTP + JSON-RPC 为主路径（保留 TCP 兼容）。GUI 现有 ServiceClient + Vite 代理可复用；下一步由 dev-service-api 落地 \"POST /rpc\" 并与 GUI 端到端联调，完成后再推进交付。",
   "notes": [
-    "dev-core-scanner 与 dev-cli-tui：此前已在交付工作区通过独立测试",
-    "dev-service-api：已实现 scan.start/status/result/cancel 方法族并自测通过",
-    "dev-macos-gui：本轮完成初始骨架与占位 RPC 封装，npm 构建通过；cargo check 因 rustc < 1.88 失败，记录为环境限制",
-    "后续动作建议：升级构建环境 rustc 至 1.88+；完成 GUI 与服务的 JSON-RPC 集成及端到端扫描流程"
+    "design-architect：已更新 Architecture.md（3/4.2/4.4/5.2/6.2）明确 HTTP 主路径与 TCP 兼容路径",
+    "dev-service-api：需实现 HTTP JSON-RPC 入口 \"POST /rpc\"（默认 http://127.0.0.1:1234/rpc），复用现有方法族",
+    "dev-macos-gui：ServiceClient.tsx + vite 代理已就绪，待服务端 HTTP 入口可用后进行端到端验证",
+    "交付阶段测试：优先使用 HTTP /rpc 进行服务模式验收；TCP 入口作为兼容路径",
+    "环境限制：Tauri Rust 宿主仍受 rustc < 1.88 影响，打包需在具备 1.88+ 的 macOS 环境执行"
   ]
 }

@@ -18,7 +18,7 @@
   - `App.tsx`：顶层应用组件，负责在 Onboarding 与主界面之间切换。
   - `components/Onboarding.tsx`：Onboarding 占位页面。
   - `components/MainLayout.tsx`、`Sidebar.tsx`、`TopBar.tsx`、`CentralView.tsx`：主界面布局骨架组件。
-  - `services/ServiceClient.ts`：前端侧 JSON-RPC 客户端封装（占位实现）。
+  - `services/ServiceClient.ts`：前端侧 JSON-RPC 客户端封装（JSON-RPC 集成）。
 - 根目录下辅助文件：
   - `package.json` / `tsconfig*.json` / `vite.config.ts` / `index.html`：前端与 Tauri 构建配置。
   - `todo.md`：本工作区开发任务清单。
@@ -120,9 +120,66 @@ npm run tauri build
 
 1. 确认 TypeScript 与 Rust 源码均能在本地通过基本编译（视环境而定）：
    - `cd workspaces/dev-macos-gui && npm run build`（或 `npm run lint` 等）
-   - `cd workspaces/dev-macos-gui && cargo check --manifest-path src-tauri/Cargo.toml`
+   - `cd workspaces/dev-macos-gui && cargo check --manifest-path src-tauri/Cargo.toml`（当前受 `rustc 1.86.0` 限制，详见 `bug.md`）
 2. 启动前端 dev server，确认 UI 占位渲染正常：
    - `cd workspaces/dev-macos-gui && npm run dev`
-   - 访问本地地址，确认 Onboarding、主界面骨架布局以及「服务未连接」提示显示正常。
+   - 访问本地地址，确认 Onboarding、主界面骨架布局以及 JSON-RPC 相关状态栏渲染正常。
 
 > 当前环境下若无法完整执行上述命令，请在本地 macOS 开发机上验证。自测结果与已知问题会同步记录在本工作区的 `todo.md` 与 `bug.md` 中。
+
+## 8. 本地 JSON-RPC 连接自测
+
+本节描述在不升级全局 `rustc`（当前为 1.86.0，Tauri 侧无法编译）的前提下，仅通过前端 React 应用直连 JSON-RPC 服务完成最小端到端验证的推荐步骤。
+
+### 8.1 启动 JSON-RPC 服务
+
+在仓库根目录下，优先使用 `dev-service-api` 工作区内已有的测试脚本或已构建好的二进制：
+
+```bash
+# 方式一：使用测试脚本（推荐）
+./workspaces/dev-service-api/test_service.sh
+
+# 方式二：直接运行已构建的服务二进制
+./workspaces/dev-service-api/target/release/surf-service \
+  --service --host 127.0.0.1 --port 1234
+```
+
+预期：服务在 `127.0.0.1:1234` 以 JSON-RPC 2.0 协议监听请求。
+
+### 8.2 启动 GUI 前端（仅前端，不启动 Tauri）
+
+```bash
+cd workspaces/dev-macos-gui
+npm install   # 如已安装依赖可跳过
+npm run dev
+```
+
+在浏览器中访问终端输出中的本地地址（通常为 `http://localhost:5173`）。
+
+> `vite.config.ts` 中已配置将 `/rpc` 代理到 `http://127.0.0.1:1234`，因此在 dev 模式下无需额外处理 CORS 问题。
+
+### 8.3 端到端扫描验证步骤
+
+1. 在 GUI 中进入主界面（通过 Onboarding 后）。
+2. 在中央「最小端到端扫描（JSON-RPC）」区域：
+   - 在「扫描路径」输入框中填入一个本地目录路径，例如：
+     - `workspaces/delivery-runner/test/tmp/tc1.Wp8z`，或
+     - 你本机上的任意测试目录（建议包含少量文件以便快速完成）。
+   - 点击「开始扫描」。
+3. 观察右侧状态栏与列表：
+   - 顶部任务状态栏应显示任务状态（`queued`/`running`/`completed` 等）、进度百分比、`scanned_files` 与 `scanned_bytes`；
+   - 当任务状态进入 `completed` 后，下方「Top 文件列表」会展示从 JSON-RPC `scan.result` 返回的 `summary.top_files` / `top_files` 列表（路径 + 大小等信息）。
+4. 如在浏览器控制台或 UI 中看到错误提示（例如无法连接服务、端口占用等），可参考以下排查方向：
+   - 确认 `surf-service` 是否仍在 `127.0.0.1:1234` 监听；
+   - 检查是否有防火墙或安全软件拦截本地连接；
+   - 如需更改端口，可同步调整 `vite.config.ts` 代理配置或在未来迭代表层增加可配置项。
+
+### 8.4 预期结果与已知限制
+
+- 预期结果：
+  - 成功发起扫描并在 GUI 中看到进度更新；
+  - 扫描完成后，在「Top 文件列表」中渲染来自 JSON-RPC 服务的文件列表。
+- 已知限制：
+  - 当前迭代仅实现最小端到端流程，尚未接入 Treemap 视图与完整目录树展示；
+  - Tauri 宿主应用仍受 `rustc 1.86.0` 限制，未在本环境中编译/运行，相关问题记录在 `bug.md`；
+  - 若 JSON-RPC 服务端使用的传输层与浏览器期望不一致（例如纯 TCP 而非 HTTP），则可能需要在后续迭代中引入额外的本地代理或调整服务实现。

@@ -7,7 +7,14 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    // 为前端提供到本地 JSON-RPC 服务 (127.0.0.1:1234) 的代理，避免浏览器跨域限制。
+    proxy: {
+      "/rpc": {
+        target: "http://127.0.0.1:1234",
+        changeOrigin: false
+      }
+    }
   },
   clearScreen: false
 });
