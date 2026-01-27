@@ -20,4 +20,9 @@
     - 在本机或 CI 上升级 Rust 工具链至 `1.88.0` 或更高版本；或
     - 在具备更高版本 Rust 的环境中执行构建与打包；或
     - 根据 Tauri 官方支持矩阵，选择与当前 `rustc` 兼容的旧版 Tauri 及其依赖（需进一步验证）。
+  
+- 环境阻塞：Tauri 后端需 `rustc >= 1.88.0`（Architecture.md 10.1），当前环境为 `rustc 1.86.0`，
+  导致 `cargo check --manifest-path src-tauri/Cargo.toml` 及依赖 Tauri 宿主编译的命令（如 `cargo build`、
+  `npm run tauri:dev`、`npm run tauri:build`）无法通过，本轮开发在 Tauri 宿主层面受阻。
+
 - 状态：待环境升级 / 兼容性确认

@@ -10,6 +10,7 @@ workspaces/delivery-runner/
 
 # macOS GUI 页面快照（联调/E2E 生成）
 dev-macos-gui-page-*.json
+workspaces/dev-macos-gui/dev-page-snapshot.json
 
 # 通用本地缓存（如有）
 .DS_Store
