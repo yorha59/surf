@@ -2,8 +2,17 @@ import React from "react";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { CentralView } from "./CentralView";
+import { SurfConfig } from "../services/ServiceClient";
 
-export const MainLayout: React.FC = () => {
+export interface MainLayoutProps {
+  config: SurfConfig;
+  onConfigChange: (config: SurfConfig) => void | Promise<void>;
+}
+
+export const MainLayout: React.FC<MainLayoutProps> = ({
+  config,
+  onConfigChange
+}) => {
   return (
     <div
       style={{
@@ -14,7 +23,7 @@ export const MainLayout: React.FC = () => {
         color: "#e5e7eb"
       }}
     >
-      <Sidebar />
+      <Sidebar config={config} onConfigChange={onConfigChange} />
       <div
         style={{
           flex: 1,

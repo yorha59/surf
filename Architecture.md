@@ -214,7 +214,35 @@
 - 不负责终端侧交互；
 - 不负责系统级安装 / 卸载逻辑（可在交付阶段补充）。
 
-#### 4.4.1 `dev-macos-gui` 集成指导（HTTP 主路径）
+#### 4.4.1 Onboarding 初始化与配置写入
+
+1. 配置文件存在性检测与路径约定：
+   - macOS GUI 在每次启动时按统一约定检查配置文件路径 `~/.config/surf/config.json`（与 Linux 一致，遵循 Surf 自定义约定而非系统偏好）；
+   - 若文件存在且可解析，则作为 GUI、服务与 CLI 的默认配置来源之一（具体字段见第 4.5.1 节）；
+   - 若文件不存在或无法解析，将按“首次启动”路径处理，并在 Onboarding 结束时生成新的配置文件；无法解析的旧配置可按实现需要备份到同目录下的备份文件（例如 `config.json.bak`）。
+
+2. 首次启动与默认配置生成：
+   - 当检测到配置文件缺失/不可用时，GUI 进入 Onboarding 流程（欢迎页、权限引导、基础配置）；
+   - Onboarding 过程至少收集：
+     - 默认扫描路径（映射到配置字段 `default_path`，建议预填为当前用户主目录，如 `~/`）；
+     - 默认并发线程数（`threads`，建议预填为逻辑核心数）；
+     - 默认最小过滤大小（`min_size`，如 `"100MB"`，可由用户调整）；
+     - JSON-RPC 服务地址与端口（`rpc_host` / `rpc_port`），用于 GUI 与服务的默认连接，建议默认 `127.0.0.1:1234`；
+   - Onboarding 完成后，GUI 将在 `~/.config/surf/config.json` 写入一份符合第 4.5.1 节约定的 JSON 配置文件，作为后续运行的默认配置基础。
+
+3. GUI 对配置的读取与写入行为：
+   - GUI 启动时从配置文件中读取 `default_path` / `threads` / `min_size` / `rpc_host` / `rpc_port` / `theme` / `language` 等字段，填充设置面板与默认扫描参数：
+     - 若 `theme` 缺失，GUI 默认“跟随系统主题”；
+     - 若 `language` 缺失，GUI 默认“跟随系统语言”，在中英之间自动选择；
+   - 用户在设置面板中修改以上选项后，GUI 应回写同一路径配置文件，保证下次启动时行为一致；
+   - GUI 可在 Onboarding 或设置中额外收集并写入 `exclude_patterns`、`stale_days` 等扩展字段，但这些字段的解释以共享模型模块的定义为准。
+
+4. 与服务和 CLI 行为的映射（概览）：
+   - GUI 在“启动/连接服务”时，优先使用配置中的 `rpc_host` / `rpc_port` 作为默认连接目标；用户在 GUI 中覆盖后可选择同步回写配置；
+   - 当 GUI 提供“一键启动 CLI”或“从配置启动 CLI”能力时，应将配置中的 `cli_path`（如 `cli/surf` 或系统 PATH 中的 `surf`）作为默认可执行路径，并以 `default_path` / `threads` / `min_size` 作为缺省命令行参数来源；
+   - 对详细字段含义、默认值与跨模块映射，见第 4.5.1 节。
+
+#### 4.4.2 `dev-macos-gui` 集成指导（HTTP 主路径）
 
 1. 前端调用方式（当前主路径）：
    - `workspaces/dev-macos-gui/src/services/ServiceClient.tsx` 作为 GUI 与服务之间的统一 JSON-RPC 调用封装，固定使用 `fetch("/rpc")` 以 HTTP POST 方式发送 JSON-RPC 请求；
@@ -254,6 +282,87 @@
 3. 统一序列化约定：
    - 确保 CLI JSON 输出、JSON-RPC 返回、GUI 前端消费的数据结构保持一致；
    - 避免不同模块各自定义不兼容的字段命名与类型。
+
+#### 4.5.1 配置文件路径与 JSON Schema（约定）
+
+1. 配置文件路径约定（macOS 与 Linux）：
+   - 全局配置文件统一存放在 `~/.config/surf/config.json`，适用于 macOS 与 Linux，遵循本项目自定义约定，避免因不同平台偏好目录差异导致配置分裂；
+   - 当前版本不支持 Windows 平台，未来如扩展 Windows 时可在本节新增对应路径约定，但不改变现有 macOS/Linux 行为。
+
+2. 核心字段与默认值（逻辑语义）：
+
+   - `default_path: string`
+     - 含义：命令行 / GUI 默认扫描路径；
+     - 推荐默认值：GUI Onboarding 首次生成配置时预填为当前用户主目录（例如 `~/`）；
+     - CLI 行为：若用户未通过 `--path` 指定路径且配置文件存在，可选择使用 `default_path` 作为默认扫描路径；如配置缺失或解析失败，CLI 仍保留 `.` 作为最终兜底默认（保证与 PRD 一致）。
+
+   - `threads: number`
+     - 含义：默认扫描线程数；
+     - 默认值：逻辑 CPU 核心数（与 PRD 中 CLI 默认一致）；
+     - 作用：
+       - CLI：在用户未指定 `--threads` 时，可从配置读取该值；
+       - 服务：在 `--threads` 未显式配置的情况下，可将其作为扫描任务的默认线程数；
+       - GUI：作为 Onboarding 和设置页的默认线程建议值。
+
+   - `min_size: string`
+     - 含义：最小过滤大小，支持 `B/KB/MB/GB` 等后缀（与 CLI `--min-size` 语义一致）；
+     - 默认值：`"0"`（表示不过滤），GUI Onboarding 可根据 UX 建议给出更高的默认值（例如 `"100MB"`），并写入该字段；
+     - 作用：被 CLI、服务、GUI 作为 `--min-size` 或 JSON-RPC `min_size` 的默认来源。
+
+   - `rpc_host: string`
+     - 含义：JSON-RPC 服务默认监听地址；
+     - 默认值：`"127.0.0.1"`；
+     - 作用：
+       - 服务模式：在未显式指定 `--host` 时，服务可从该字段读取默认监听地址；
+       - GUI：作为默认连接目标；
+       - 其他客户端：可复用该字段与 `rpc_port` 组合构造默认服务地址。
+
+   - `rpc_port: number`
+     - 含义：JSON-RPC 服务默认端口；
+     - 默认值：`1234`（对齐 PRD）；
+     - 作用：同 `rpc_host`，被服务、GUI、CLI 等作为默认端口使用。
+
+   - `cli_path: string`（可选）
+     - 含义：指向交付包内 CLI 可执行文件的路径，用于 GUI 中“一键启动 CLI”或对照运行；
+     - 示例：`"/usr/local/bin/surf"` 或 DMG/应用包内的相对路径 `"cli/surf"`；
+     - 作用：GUI 或其他工具可通过该字段找到 CLI 可执行文件并按配置拼装命令行参数。
+
+   - `theme: string`（可选）
+     - 取值范围：`"light"` / `"dark"`；
+     - 含义：GUI 首选主题；
+     - 默认行为：若字段缺失，GUI 视为“跟随系统主题”。
+
+   - `language: string`（可选）
+     - 取值范围：`"en"` / `"zh-CN"`；
+     - 含义：GUI 首选界面语言；
+     - 默认行为：若字段缺失，GUI 视为“跟随系统语言”。
+
+   - `exclude_patterns: string[]`（可选，扩展字段）
+     - 含义：排除目录/文件的模式集合，可使用 glob 或正则语法（与 JSON-RPC `exclude_patterns` 字段语义一致）；
+     - 作用：
+       - CLI：在用户未通过命令行显式传入排除规则时，可将该字段作为默认排除集；
+       - 服务 / GUI：在创建扫描任务时，为 `ScanRequest` 提供默认排除模式。
+
+   - `stale_days: number`（可选，扩展字段）
+     - 含义：时间维度分析中“陈旧文件”判定的阈值天数；
+     - 推荐默认值：例如 `365`（一年），可在 Onboarding 或设置中由用户调整；
+     - 作用：用于核心引擎判断 `stale_files` 列表的时间阈值。
+
+3. 跨模块配置使用与优先级规则（摘要）：
+
+   - CLI / TUI：
+     - 参数优先级：命令行参数 > 环境变量（如未来引入）> 配置文件 > 内建默认值；
+     - 当配置文件存在时，`default_path` / `threads` / `min_size` 可作为默认值来源，但不得改变 PRD 规定的参数语义（即显式参数始终优先）。
+
+   - JSON-RPC 服务：
+     - 启动时优先解析命令行中的 `--host` / `--port` / 其他服务级参数；
+     - 若未显式提供，则尝试从配置文件中读取 `rpc_host` / `rpc_port` 等字段；
+     - 若配置缺失或不可用，则退回编译期默认（`127.0.0.1:1234`），确保服务仍可启动。
+
+   - macOS GUI：
+     - 启动时先读取配置文件并将字段映射到设置页和默认扫描参数；
+     - 首次启动无配置时，通过 Onboarding 生成配置文件（见第 4.4.1 节）；
+     - 在设置页修改配置后，通过共享模型模块负责将变更写回 `~/.config/surf/config.json`。
 
 **不负责的内容：**
 
@@ -578,12 +687,25 @@ CSV / HTML 导出格式可在后续设计中进一步补充，仅要求字段集
 
 - `release/gui/`
   - `Surf.app`：macOS 应用包（可直接拖入应用程序目录）；
-  - 或 `Surf-macos-universal.zip` / `.dmg` 等安装包文件。
+  - 其他用于 GUI 分发的打包形式（例如 `Surf-macos-universal.zip`），通常仅包含 GUI 自身及必要的运行时资源。
+
+- `release/installer/`
+  - `Surf-macos.dmg` 或 `Surf-macos-universal.dmg`：面向最终用户的 macOS 安装镜像，统一包含：
+    - `Surf.app`：GUI 应用包；
+    - `cli/surf`：CLI 二进制（可为实际文件或指向 `release/cli/` 中对应二进制的符号链接）；
+    - `README.txt` 或等价的最小使用说明：简要说明 DMG 中同时包含 GUI 与 CLI 入口、推荐的安装步骤（例如将 `Surf.app` 拖入“应用程序”目录，可选地将 `cli/surf` 拖入 `/usr/local/bin`）。
 
 - `release/metadata/`
   - 版本信息、构建信息和最小使用说明（例如运行 CLI 或启动服务/GUI 的命令示例）。
 
-> 说明：当前根仓库未包含具体构建脚本，交付阶段可在交付工作区内按上述结构新增构建脚本与说明文件，不要求在本仓库根目录直接添加新的构建脚本。
+> 说明：
+> - 当前根仓库未包含具体构建脚本，交付阶段可在交付工作区内按上述结构新增构建脚本与说明文件，不要求在本仓库根目录直接添加新的构建脚本；
+> - macOS 安装包（DMG）的构建由交付工作区脚本负责，典型流程为：在临时目录中布置 `Surf.app`、`cli/surf` 与 `README`，然后基于 macOS 自带的 `hdiutil` 等工具创建只读 DMG；
+> - 构建环境依赖：需要在 macOS 上执行，通常要求安装 Xcode Command Line Tools；
+> - 签名与未签名差异：
+>   - 未签名 DMG 在首次运行时可能触发 Gatekeeper 提示，需要用户通过“仍要打开”流程确认；
+>   - 如需提供已签名/公证的 DMG，则应在交付脚本中增加基于 Apple Developer ID 的签名与公证步骤，但这属于发行流程扩展，不改变本节产物路径与内容约定；
+> - 从 DMG 安装后的预期行为：用户将 `Surf.app` 拖入“应用程序”后，GUI 启动时默认读取 `~/.config/surf/config.json`；若该文件不存在，则按第 4.4.1 节所述创建默认配置并进入 Onboarding 流程；同时，DMG 中的 `cli/surf` 在被复制到系统 PATH 后应可直接运行，并与同一配置文件协同工作（例如复用 `default_path` / `threads` / `min_size` 等默认值）。
 
 ### 8.3 交付阶段内的测试视图（与 PRD 对齐）
 

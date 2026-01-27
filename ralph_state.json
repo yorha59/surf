@@ -1,12 +1,11 @@
 {
-  "phase": "delivery",
-  "iteration": 19,
-  "reason": "已由 requirements-manager 在 human.md 写入 GUI-01/02/03 人工测试待办，等待人类在本地 macOS GUI 环境执行并回填结果，交付阶段暂保持。",
+  "phase": "development",
+  "iteration": 22,
+  "reason": "推进到开发阶段：dev-macos-gui 已落地 Onboarding 初始化与统一配置路径 (~/.config/surf/config.json) 的读写，实现 App 启动读取/缺失进入 Onboarding/设置面板回写；其余模块待并行完成后再进入交付（含 DMG 构建）。",
   "notes": [
-    "交付文档：release/README.md 已新增 GUI 使用说明章节（运行依赖、启动指引、开发模式、打包提示、故障排查）",
-    "交付测试：test/case.md 新增 GUI-01/02/03；run-tests.sh 已挂接并在 test-log.md 标记为 SKIP(MANUAL)",
-    "CLI 测试：workspaces/delivery-runner/test/test-log.md 显示 TC-CLI-A/B/C 均通过；failures.md 为空",
-    "发布产物：workspaces/delivery-runner/release/ 目录仍以 CLI/核心库为主；service 二进制如未内置，README 指向 dev-service-api 工作区产物",
-    "新增人类待办：requirements-manager 已在 human.md 写入 GUI-01/02/03 人工测试执行清单（环境要求、步骤、预期、结果回填）"
+    "dev-macos-gui：在 src-tauri 新增 read_config/write_config 命令，前端 ServiceClient 集成 SurfConfig 读写，App/Onboarding/Sidebar 完成配置驱动",
+    "HTTP 主路径保持：fetch('/rpc') + vite 代理到 127.0.0.1:1234/rpc，未更改 JSON-RPC 集成约定",
+    "环境提示：Tauri 端到端运行需 rustc >= 1.88.0；当前仓库前端构建通过，Rust 侧本机检查存在版本不足（不影响本轮逻辑实现）",
+    "后续：等待其他开发 Agent（core/service/cli）本轮任务完成后统一进入交付，新增 DMG 构建脚本与产物"
   ]
 }

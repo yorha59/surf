@@ -1,8 +1,102 @@
 import React, { createContext, useContext, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/tauri";
 
 /**
  * JSON-RPC 扫描相关类型（与 Architecture.md 6.2 及 dev-service-api 对齐的最小子集）。
  */
+
+// ---- 全局配置（~/.config/surf/config.json）类型与工具函数 ----
+
+export interface SurfConfig {
+  /** 默认扫描路径，例如 `~/` 或某个常用目录。 */
+  default_path: string;
+  /** 默认扫描线程数，建议为逻辑 CPU 数。 */
+  threads: number;
+  /** 最小过滤大小，字符串形式，支持 B/KB/MB/GB 等后缀。 */
+  min_size: string;
+  /** JSON-RPC 服务默认主机。 */
+  rpc_host: string;
+  /** JSON-RPC 服务默认端口。 */
+  rpc_port: number;
+  /** CLI 可执行文件路径，可选。 */
+  cli_path?: string;
+  /** GUI 首选主题，可选："light" / "dark"，缺省表示跟随系统。 */
+  theme?: "light" | "dark";
+  /** GUI 首选语言，可选："en" / "zh-CN"，缺省表示跟随系统。 */
+  language?: "en" | "zh-CN";
+}
+
+/**
+ * 根据浏览器环境推导一份用于 Onboarding 的默认配置。
+ *
+ * - default_path: `~/`（用户主目录）
+ * - threads: 逻辑 CPU 核心数（如不可用则回退为 4）
+ * - min_size: `"100MB"`（与 Architecture.md 4.5.1 建议一致）
+ * - rpc_host / rpc_port: 127.0.0.1:1234
+ */
+export function createDefaultConfig(): SurfConfig {
+  const threads = typeof navigator !== "undefined" && navigator.hardwareConcurrency
+    ? navigator.hardwareConcurrency
+    : 4;
+
+  return {
+    default_path: "~/",
+    threads,
+    min_size: "100MB",
+    rpc_host: "127.0.0.1",
+    rpc_port: 1234
+  };
+}
+
+function isTauriAvailable(): boolean {
+  if (typeof window === "undefined") return false;
+  // `__TAURI_IPC__` 为 Tauri 在 WebView 中注入的标记，在纯浏览器环境下不存在。
+  return Boolean((window as any).__TAURI_IPC__);
+}
+
+/**
+ * 通过 Tauri `invoke` 从 `~/.config/surf/config.json` 读取配置。
+ *
+ * 在纯浏览器开发模式下（未通过 Tauri 启动）会直接返回 `null`，
+ * 由上层逻辑决定是否进入 Onboarding 流程。
+ */
+export async function readConfig(): Promise<SurfConfig | null> {
+  if (!isTauriAvailable()) {
+    console.info("[surf gui] 当前不在 Tauri 环境中，readConfig 将返回 null");
+    return null;
+  }
+
+  try {
+    const config = await invoke<SurfConfig | null>("read_config");
+    return config ?? null;
+  } catch (e) {
+    console.error("[surf gui] 调用 read_config 失败，将退回到 Onboarding 路径", e);
+    return null;
+  }
+}
+
+/**
+ * 通过 Tauri `invoke` 将配置写入统一路径 `~/.config/surf/config.json`。
+ *
+ * 在非 Tauri 环境下，为避免阻塞 GUI 使用，函数会记录 warning 并直接返回，
+ * 但不会真正写入本地配置文件（属于环境限制，而非功能缺陷）。
+ */
+export async function writeConfig(config: SurfConfig): Promise<void> {
+  if (!isTauriAvailable()) {
+    console.warn(
+      "[surf gui] 当前不在 Tauri 环境中，写入配置将被跳过（仅在 Tauri 应用中生效）",
+      config
+    );
+    return;
+  }
+
+  try {
+    await invoke("write_config", { config });
+  } catch (e) {
+    console.error("[surf gui] 调用 write_config 失败，配置未能持久化", e);
+    throw e;
+  }
+}
 
 export type ScanState =
   | "queued"
