@@ -1,13 +1,13 @@
 {
-  "phase": "delivery",
-  "iteration": 30,
-  "reason": "环境已升级（rustc 1.93.0 >= 1.88.0），dev-macos-gui 在本轮完成 Tauri 后端编译与 GUI 端到端联调并在工作区落盘标记；其余开发 Agent 之前均已完成与自测通过，满足并行开发全部完成的推进条件，进入交付阶段以统一打包与独立测试。",
+  "phase": "development",
+  "iteration": 31,
+  "reason": "交付阶段测试失败：delivery-runner 在交付工作区聚合与独立测试时，CLI 无法构建（dev-cli-tui 依赖 crate 命名错误），GUI 未产出 Surf.app（仅 dist 占位，Tauri 构建环境未就绪）；服务二进制通过。按向上反馈原则回退到开发阶段，由相关开发 Agent 修复后再重试交付。",
   "notes": [
-    "环境状态：rustc --version = 1.93.0（通过 rustup update stable 升级）",
-    "dev-macos-gui：已完成端到端联调（HTTP /rpc 主路径），todo.md 顶部标记为完成；Surf.app 打包成功，DMG 脚本 bundle_dmg.sh 存在失败记录（已记入 bug.md）",
-    "dev-service-api：已完成且自测通过（HTTP POST /rpc 方法族齐备）",
-    "dev-core-scanner：核心扫描/并行/类型统计/TopN/陈旧识别均完成并通过自测",
-    "dev-cli-tui：CLI/TUI 基本能力与自测完成",
-    "下一步：调用 delivery-runner 在交付工作区聚合各工作区产物，完成统一打包与基于 PRD 的独立测试；若测试失败，将失败文档广播给全部开发 Agent 并按向上反馈规则决定是否回退"
+    "交付产物：release/service/surf-service-macos-x86_64 构建成功并通过 HTTP /rpc 用例",
+    "交付产物：release/cli/surf-macos-x86_64 为占位脚本，真实 CLI 二进制缺失（构建失败）",
+    "交付产物：release/gui/dist/ 仅为前端静态资源，占位替代 Surf.app；installer/ 未产出 DMG",
+    "失败用例集中于 CLI（表格输出/JSON/非法参数校验）与 GUI 端到端（跳过）",
+    "需要广播：workspaces/delivery-runner/test/failures.md 与 release/metadata/BUILD-REPORT.md 给 dev-cli-tui、dev-macos-gui（同时抄送其他 dev Agent）",
+    "下一步：并行调度 dev-cli-tui 修复 Cargo.toml 依赖名（surf-core → surf_core）并完成可运行 CLI；dev-macos-gui 在满足 rustc >= 1.88.0 的环境下完成 Surf.app 打包与自测；修复后再次进入交付阶段"
   ]
 }
