@@ -734,3 +734,59 @@ CSV / HTML 导出格式可在后续设计中进一步补充，仅要求字段集
 5. GUI 内 Treemap 与列表视图的具体视觉规范与交互微细节。
 
 后续迭代可在本初稿基础上，按模块/章节逐步补充实现级设计（例如关键数据结构字段列表、错误码表、具体导出格式等），同时根据开发与交付阶段的反馈进行调整。
+
+## 10. 工具链与构建环境要求（补充）
+
+> 本节旨在将当前已知的工具链与构建环境前置条件集中记录，便于开发/交付节点及人类协作者在本机或 CI 环境中准备一致的构建基础。以下约束均为**实现层面的环境要求**，不改变已有的外部接口契约（包括 HTTP `/rpc` 主路径）。
+
+### 10.1 Rust 工具链版本约束（特别是 macOS GUI / Tauri）
+
+1. 全局约定：
+   - 项目整体后端与核心模块使用 **Rust Edition 2021**（见第 3 节），各工作区在无特殊说明时默认依赖稳定版 Rust 工具链（stable channel）。
+
+2. macOS GUI / Tauri 后端最小版本要求：
+   - 依据 `workspaces/dev-macos-gui/` 当前依赖链（包含 Tauri 及其间接依赖 `time` crate），Tauri 后端的编译在 `rustc 1.86.0` 下无法通过，错误原因是依赖链要求 **`rustc >= 1.88.0`**；
+   - 为保障 macOS GUI 工作区可以完成 **Tauri 后端编译、自测与打包**，本架构设计将：
+     - **`rustc 1.88.0 及以上` 视为 macOS GUI / Tauri 相关 crate 的最低版本要求；**
+     - 推荐在同一开发/交付环境中，将所有 Rust 工作区（`dev-core-scanner`、`dev-cli-tui`、`dev-service-api`、`dev-macos-gui`）统一使用 `rustc >= 1.88.0` 的稳定版工具链，以降低版本漂移带来的隐性兼容风险。
+
+3. 对当前阻塞的判定：
+   - 在仅具备 `rustc 1.86.0` 的环境中：
+     - `dev-core-scanner`、`dev-cli-tui`、`dev-service-api` 等工作区已经能够完成构建与自测（见各自 `todo.md`）；
+     - `dev-macos-gui` 的 **Tauri 后端** 编译与 `cargo check --manifest-path src-tauri/Cargo.toml` 仍会因 Rust 版本不足而失败，导致无法在本机完成 GUI 形态的端到端运行与验收；
+   - 因此，本问题被归类为：
+     - **环境/工具链依赖不足，而非架构或接口设计缺陷**；
+     - 一旦目标环境升级至 `rustc >= 1.88.0`，现有 `Architecture.md` 中关于 GUI 与服务之间通过 HTTP `/rpc` 路径集成的设计即可按既定方案落地，无需调整接口契约。
+
+4. 对后续开发与交付节点的建议：
+   - 在为 macOS GUI 相关工作（包括本地开发、自测与交付构建）准备环境时，应显式执行：
+     - `rustup update stable`，并确认 `rustc --version` 输出中的版本号不低于 `1.88.0`；
+   - 若 CI 或交付机上使用固定版本的 Rust 工具链，应将 `1.88.0` 或更高版本作为镜像/环境配置的一部分，并在交付工作区的构建脚本或 README 中补充说明（该补充属于交付阶段文档，不改变本文件的接口设计）。
+
+### 10.2 macOS DMG 构建环境前置条件
+
+> 本小节在第 8.2 节的基础上，将 macOS 安装镜像（DMG）构建所需的环境前置条件集中列出，仅作为对交付节点与人类协作者的补充说明，不改变 `release/` 目录结构与已有交付视图约定。
+
+1. 平台与系统工具：
+   - DMG 构建必须在 **macOS 环境** 中进行，支持 Intel 与 Apple Silicon；
+   - 需要安装 **Xcode Command Line Tools**，以便获得 `clang`、`codesign` 等基础工具链；
+   - 依赖系统自带的 **`hdiutil`** 工具创建只读 DMG 镜像（第 8.2 节已给出典型脚本流程，本处仅重申其为环境前置条件）。
+
+2. 相关构建链路依赖（摘要）：
+   - 在交付工作区内构建 macOS GUI 相关产物时，通常需要：
+     - Rust 稳定版工具链 `rustc >= 1.88.0`（用于编译 Tauri 后端与 `surf-service` 等 Rust 二进制）；
+     - Node.js / npm（或等价工具）以执行 `npm run build`、`npm run tauri:build` 等前端/Tauri 打包命令（具体命令由 `workspaces/dev-macos-gui/` 中的实现与文档决定）；
+   - 这些依赖用于生成：
+     - `Surf.app`（Tauri 打包生成的 macOS 应用包）；
+     - 基于 `Surf.app` 与 CLI 二进制在交付工作区组合出来的 DMG（`release/installer/Surf-macos*.dmg`）。
+
+3. 与 HTTP `/rpc` 主路径的关系：
+   - 本节所述工具链与构建环境要求仅影响：
+     - GUI 与服务二进制是否能够在目标环境中成功构建与打包；
+     - DMG 是否能够在交付阶段顺利产出。
+   - **不改变** 已在第 3、4.2、4.4.2、5.2 与 6.2 节中约定的对外接口契约：
+     - JSON-RPC 服务仍以 `POST /rpc` 形式在 `http://<host>:<port>/rpc`（默认 `http://127.0.0.1:1234/rpc`）暴露；
+     - macOS GUI 在开发模式与打包后形态中，继续通过 `fetch("/rpc")` 调用该 HTTP 入口（开发模式由 Vite 代理到 `127.0.0.1:1234/rpc`，打包后由 Tauri 后端转发到本机运行的服务）；
+   - 换言之：
+     - 若环境暂时无法满足本节工具链要求，GUI 形态的构建与本地端到端自测会受阻；
+     - 但服务接口与 CLI/TUI 形态的对外行为与路径约定保持不变，后续在环境满足要求后可按既定架构自然完成 GUI 与服务的拼接。

@@ -22,7 +22,7 @@ dev-core-scanner/target/
 dev-service-api/target/
 
 # 前端常见构建产物（macOS GUI 子工程）
-workspaces/dev-macos-gui/node_modules/
-workspaces/dev-macos-gui/dist/
 dev-macos-gui/node_modules/
 dev-macos-gui/dist/
+workspaces/dev-macos-gui/node_modules/
+workspaces/dev-macos-gui/dist/

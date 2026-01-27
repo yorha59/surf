@@ -1,11 +1,12 @@
 {
-  "phase": "development",
-  "iteration": 22,
-  "reason": "推进到开发阶段：dev-macos-gui 已落地 Onboarding 初始化与统一配置路径 (~/.config/surf/config.json) 的读写，实现 App 启动读取/缺失进入 Onboarding/设置面板回写；其余模块待并行完成后再进入交付（含 DMG 构建）。",
+  "phase": "design",
+  "iteration": 23,
+  "reason": "设计阶段补充：在 Architecture.md 新增工具链与构建环境要求（macOS GUI/Tauri 需 rustc >= 1.88.0；DMG 构建需 macOS + Xcode CLT + hdiutil），保持 HTTP /rpc 契约不变；建议由 requirements-manager 在 human.md 写入环境升级待办以解除 dev-macos-gui 阻塞。",
   "notes": [
-    "dev-macos-gui：在 src-tauri 新增 read_config/write_config 命令，前端 ServiceClient 集成 SurfConfig 读写，App/Onboarding/Sidebar 完成配置驱动",
-    "HTTP 主路径保持：fetch('/rpc') + vite 代理到 127.0.0.1:1234/rpc，未更改 JSON-RPC 集成约定",
-    "环境提示：Tauri 端到端运行需 rustc >= 1.88.0；当前仓库前端构建通过，Rust 侧本机检查存在版本不足（不影响本轮逻辑实现）",
-    "后续：等待其他开发 Agent（core/service/cli）本轮任务完成后统一进入交付，新增 DMG 构建脚本与产物"
+    "阻塞：dev-macos-gui 当前环境 rustc 1.86.0，无法完成 Tauri 端到端自测；需在 macOS 环境升级到 rustc >= 1.88.0",
+    "dev-service-api：本轮已完成且自测通过（HTTP POST /rpc 方法族齐备）",
+    "dev-core-scanner：核心扫描/并行/类型统计/TopN/陈旧识别均完成并通过自测",
+    "dev-cli-tui：CLI/TUI 基本能力与自测完成",
+    "全局阶段建议：待 GUI 在满足工具链要求的环境中完成端到端自测并在工作区落盘完成声明后，再整体推进到交付阶段"
   ]
 }
