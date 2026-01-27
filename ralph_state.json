@@ -1,11 +1,11 @@
 {
   "phase": "development",
-  "iteration": 11,
-  "reason": "进入开发阶段：已调度 dev-service-api，完成 JSON-RPC 服务骨架与自测；仍需等待 dev-macos-gui 完成后再整体推进交付。",
+  "iteration": 12,
+  "reason": "仍处于开发阶段：已调度并完成 dev-macos-gui 的 macOS GUI 初始骨架（Tauri + React），前端构建自测通过；Rust 宿主编译受全局 rustc 版本限制。待完成 JSON-RPC 集成与端到端 GUI 流程后再统一进入交付阶段。",
   "notes": [
-    "dev-core-scanner 与 dev-cli-tui 已在上一轮交付工作区通过独立测试",
-    "dev-service-api 本轮实现：tokio TCP JSON-RPC、scan.start/status/result/cancel 方法；自测通过（cargo test 与 test_service.sh）",
-    "建议：在全部开发 Agent 完成后统一进入交付阶段做整体验收；当前仍缺 dev-macos-gui",
-    "工作区参考：workspaces/dev-service-api/src/main.rs, tests/integration.rs, test_service.sh, README.md, todo.md"
+    "dev-core-scanner 与 dev-cli-tui：此前已在交付工作区通过独立测试",
+    "dev-service-api：已实现 scan.start/status/result/cancel 方法族并自测通过",
+    "dev-macos-gui：本轮完成初始骨架与占位 RPC 封装，npm 构建通过；cargo check 因 rustc < 1.88 失败，记录为环境限制",
+    "后续动作建议：升级构建环境 rustc 至 1.88+；完成 GUI 与服务的 JSON-RPC 集成及端到端扫描流程"
   ]
 }
