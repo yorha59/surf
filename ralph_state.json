@@ -1,11 +1,11 @@
 {
   "phase": "delivery",
-  "iteration": 34,
-  "reason": "交付节点已补充发布小结与快速上手指南；测试矩阵维持 7 PASS / 0 FAIL / 1 NOT_RUN（GUI-1 为人工/集成验收）。阶段继续停留在交付，等待 GUI 人工/集成验证或发布决策。",
+  "iteration": 35,
+  "reason": "已将 GUI-1 人工/集成验收登记到 human.md，等待人类在具备图形界面的 macOS 上执行并给出决策；阶段继续停留在交付。",
   "notes": [
     "构建产物：release/cli/surf-macos-x86_64；release/service/surf-service-macos-x86_64；release/gui/Surf.app；release/installer/Surf-macos-aarch64.dmg",
     "测试统计：总 8，执行 7，PASS 7，FAIL 0，NOT_RUN 1（GUI-1）",
-    "BUILD-REPORT.md 已更新（新增发布小结与快速上手）；test/case.md 的 GUI-1 明确为人工/集成测试并给出 checklist",
-    "下一步建议：在 macOS 上执行 GUI-1 人工/集成验收；或基于现有报告进入对外发布说明/部署协作"
+    "human.md 已新增条目：GUI-1 人工/集成验收未执行，需在 macOS 上完成端到端验证（报告Agent: requirements-manager）",
+    "交付工作区 BUILD-REPORT.md 与 test/case.md 记录了 GUI-1 的人工验收步骤，可按其执行"
   ]
 }
