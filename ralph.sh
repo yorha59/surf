@@ -26,7 +26,6 @@ if [[ $SHOW_HELP -eq 1 ]]; then
     echo "  本脚本总是在 tmux 会话中执行 coco，便于实时观察执行流程和调试"
     echo ""
     echo "环境变量:"
-    echo "  COCO_QUERY_TIMEOUT  设置 coco 查询超时（默认: 10m）"
     echo "  FEISHU_WEBHOOK    飞书 webhook 地址，用于通知"
     echo ""
     exit 0
@@ -109,9 +108,9 @@ run_coco_in_tmux() {
     done
     sleep 1
     
-    # 创建 tmux 会话，运行 coco 但不传递 prompt
+    # 创建 tmux 会话，运行 coco 但不传递 prompt（不再设置 --query-timeout）
     tmux new-session -d -s "$session_name" -n "coco" \
-        "coco -y --query-timeout \"${COCO_QUERY_TIMEOUT:-10m}\""
+        "coco -y"
     
     # 等待 coco 启动并完全加载
     echo "[ralph] 等待 coco 启动完成..." >&2
@@ -303,7 +302,7 @@ EOF
 
   echo "[ralph] 调用 coco 执行 git guard 检查 .gitignore 与构建产物..." >&2
   # 失败时不阻断后续流程，只打印警告
-  if ! coco -y --query-timeout "${COCO_GIT_GUARD_TIMEOUT:-5m}" -p "$GUARD_PROMPT"; then
+  if ! coco -y -p "$GUARD_PROMPT"; then
     echo "[ralph] git guard 调用 coco 失败，后续自动提交将按当前 .gitignore 执行" >&2
   fi
 }
@@ -428,7 +427,7 @@ EOF
 
   # 调用 coco 执行本轮编排工作
   # 使用 -y 自动允许工具调用，避免交互式确认导致脚本卡住
-  # 使用 --query-timeout 限制单轮查询时间，默认 10 分钟，可通过 COCO_QUERY_TIMEOUT 环境变量覆写
+  #
   echo "[ralph] 调用 coco 执行第 ${step} 轮编排..." >&2
   FLAGFILE="$(mktemp -t surf-ralph-flags-XXXXXX)"
 

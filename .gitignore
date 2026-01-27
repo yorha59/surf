@@ -1,15 +1,23 @@
-target
-__pycache__
-release/
-.DS_Store
-*.log
-*.backup
-.env
-.env.*
-dist/
-build/
-out/
-.next/
-node_modules/
-.coco
+# 测试临时文件与快照，避免跟随仓库提交
+
+# 交付阶段测试临时目录与输出
+workspaces/delivery-runner/test/tmp/
+workspaces/delivery-runner/test/out-*.json
+workspaces/delivery-runner/test/out-*.txt
+
+# 交付工作区整体（交付阶段的构建与测试产物，不随仓库提交）
 workspaces/delivery-runner/
+
+# macOS GUI 页面快照（联调/E2E 生成）
+dev-macos-gui-page-*.json
+
+# 通用本地缓存（如有）
+.DS_Store
+__pycache__/
+
+# Rust/Cargo 构建目录（各子工程）
+workspaces/*/target/
+
+# 前端常见构建产物（macOS GUI 子工程）
+workspaces/dev-macos-gui/node_modules/
+workspaces/dev-macos-gui/dist/

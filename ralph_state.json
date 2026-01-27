@@ -1,7 +1,7 @@
 {
   "phase": "delivery",
-  "iteration": 16,
-  "reason": "交付阶段已完成：delivery-runner 工作区的独立测试全部通过，未记录失败用例；release/ 目录下已汇总 CLI/核心库/服务/GUI 的构建产物，可视为当前 PRD 范围闭环。",
+  "iteration": 17,
+  "reason": "本轮复核交付状态：delivery-runner 测试日志显示全部通过，failures.md 为空；release/ 目录产物齐备，维持交付完成与闭环状态，暂不需调度后续节点。",
   "notes": [
     "交付测试：workspaces/delivery-runner/test/test-log.md 显示 TC-CLI-A/B/C 均通过",
     "失败用例：workspaces/delivery-runner/test/failures.md 为空",
