@@ -8,8 +8,6 @@ workspaces/delivery-runner/test/out-*.txt
 # 交付工作区整体（交付阶段的构建与测试产物，不随仓库提交）
 workspaces/delivery-runner/
 
-# macOS GUI 页面快照（联调/E2E 生成）
-dev-macos-gui-page-*.json
 workspaces/dev-macos-gui/dev-page-snapshot.json
 
 # 通用本地缓存（如有）
@@ -17,7 +15,6 @@ workspaces/dev-macos-gui/dev-page-snapshot.json
 __pycache__/
 
 # Rust/Cargo 构建目录（各子工程）
-workspaces/*/target/
 workspaces/**/target/
 
 # 前端常见构建产物（macOS GUI 子工程）
