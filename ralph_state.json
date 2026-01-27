@@ -1,7 +1,7 @@
 {
   "phase": "development",
-  "iteration": 25,
-  "reason": "本轮已调度 requirements-manager 规范化 human.md 中的 ENV-01（macOS GUI/Tauri 工具链升级，rustc >= 1.88.0），明确人类决策的填写格式与验收证据；当前仍处于开发阶段，等待人类将 ENV-01 标记为 DONE 并附证据后，再调度 dev-macos-gui 进行端到端自测，随后推进到交付阶段。",
+  "iteration": 26,
+  "reason": "本轮编排者复核 PRD/Architecture/human.md：ENV-01 仍为 TODO，未提供 rustc>=1.88.0 等证据；依据向上反馈与阶段推进规则，继续停留在开发阶段，等待人类完成 ENV-01 后再调度 dev-macos-gui 做端到端自测，并在其工作区落盘完成声明后整体推进到交付阶段。",
   "notes": [
     "阻塞：dev-macos-gui 当前环境 rustc 1.86.0，无法完成 Tauri 端到端自测；需在 macOS 环境升级到 rustc >= 1.88.0（human.md: ENV-01）",
     "human.md: ENV-01 已更新，要求人类在完成升级后将 人类决策: 行改写为 DONE@... 并附 rustc/xcode-select/hdiutil 证据",
