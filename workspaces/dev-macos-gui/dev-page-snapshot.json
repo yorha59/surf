@@ -1,0 +1,7 @@
+uid=1_0 RootWebArea "Surf" url="http://127.0.0.1:5173/"
+  uid=1_1 heading "欢迎使用 Surf" level="1"
+  uid=1_2 StaticText "Surf 是一款面向开发者与高级用户的磁盘空间分析工具。 当前版本的 macOS GUI 处于骨架阶段，本页面用于占位 Onboarding 流程，包括权限申请与默认配置等后续功能。"
+  uid=1_3 StaticText "· 将来会引导授予全盘访问权限（Full Disk Access）。"
+  uid=1_4 StaticText "· 配置默认扫描路径、线程数与最小文件大小过滤。"
+  uid=1_5 StaticText "· 检查本地 Surf JSON-RPC 服务是否可用。"
+  uid=1_6 button "开始使用 Surf"

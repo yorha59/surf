@@ -23,16 +23,19 @@
 ## 自测记录（本轮）
 
 - 已在本工作区执行：
-  - `npm install`
-  - `npm run build`
+  - `npm install`（历史已完成，本轮未变更依赖）；
+  - `npm run build`；
+  - `cd ../dev-service-api && cargo run --release -- --service --host 127.0.0.1 --port 1234`；
+  - `npm run dev -- --host 127.0.0.1 --port 5173`，通过浏览器访问 `http://127.0.0.1:5173/`；
+  - 在 Onboarding 页面点击「开始使用 Surf」，进入主界面后点击 TopBar 右侧「开始扫描（联调）」按钮，观察控制台日志与 TopBar 简要摘要。
 - 结果：
-  - 前端 Vite 构建成功，`ServiceClient` 与 `CentralView` / `TopBar` 的 TypeScript 代码在构建阶段无类型错误，生成 `dist/` 目录成功；
-  - `cargo check --manifest-path src-tauri/Cargo.toml` 在当前环境下仍失败，原因是全局 `rustc 1.86.0` 版本低于 Tauri 依赖链中 `time` crate 所需的 `1.88.0`（详见 `bug.md`）。
-- 端到端联调说明：
-  - 当前环境下未在同一机位同时启动浏览器与 `surf-service` 进行真实 GUI 联调，端到端流程按 Architecture/PRD + `dev-service-api` README 及集成测试契约实现；
-  - 在具备图形环境与已运行 `surf-service`（监听 `127.0.0.1:1234`）的机器上，按 `README.md` 第 8 节步骤操作，可完成路径输入 → `scan.start` → 轮询 `scan.status` → `scan.result` → 渲染 `top_files` 的最小闭环验证；
-  - 若服务端仅提供裸 TCP JSON-RPC 而非 HTTP，`/rpc` 代理将无法直接工作，此情况在 `README.md` 8.4 节中标记为已知限制，后续可通过本地 HTTP 代理或调整服务实现解决。
+  - 前端 Vite 构建成功，`ServiceClient` / `CentralView` / `TopBar` 的 TypeScript 代码在构建阶段无类型错误，生成 `dist/` 目录成功；
+  - `dev-service-api` 成功在 `http://127.0.0.1:1234/rpc` 暴露 HTTP JSON-RPC 服务；
+  - 通过 Vite 代理 `fetch("/rpc")` 成功访问后端，TopBar 联调按钮完成一次最小端到端扫描（`scan.start` → 周期性 `scan.status` → `scan.result`），浏览器控制台可见 `demo scanStart` / `demo scanStatus` / `demo scanResult` 日志，且 TopBar 显示 Demo 总大小与 TopFiles 数量摘要；
+  - 联调成功界面的截图已保存为 `workspaces/dev-macos-gui/e2e-tc1.png`；
+  - `cargo check --manifest-path src-tauri/Cargo.toml` 在当前环境下仍失败，原因是全局 `rustc 1.86.0` 版本低于 Tauri 依赖链中 `time` crate 所需的 `1.88.0`（详见 `bug.md`），该问题与本轮 JSON-RPC 联调无直接关系，保持为已知环境限制。
 
 - 结论：
-  - 本轮在 GUI 工作区内已完成前端 JSON-RPC 客户端与最小 UI 流程打通，确保在 `surf-service` 满足 HTTP JSON-RPC 入口的前提下，可实现「输入路径 → 查看进度 → 查看 Top 文件列表」的端到端闭环；
-  - Rust Tauri 宿主编译仍受全局工具链版本限制，需在具备更高 `rustc` 版本的环境中进行后续打包与 Tauri 侧集成开发。
+  - 本轮已在 macOS GUI 开发工作区内完成「开发模式下通过 `fetch("/rpc")` 联通本地 `surf-service`」的最小端到端路径，并通过实际运行 `dev-service-api` + Vite + 浏览器点击 TopBar 按钮完成一次真实扫描；
+  - 从 GUI 视角看，「联调路径打通」顶层任务已完成，后续可在此基础上扩展为完整的扫描任务管理与结果可视化；
+  - Rust Tauri 宿主编译仍受全局工具链版本限制，需在具备更高 `rustc` 版本的环境中进行后续打包与 Tauri 侧集成开发（属于环境问题，不阻塞本轮联调目标）。

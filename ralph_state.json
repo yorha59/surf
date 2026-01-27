@@ -1,12 +1,12 @@
 {
-  "phase": "development",
-  "iteration": 14,
-  "reason": "dev-service-api 已完成 HTTP + JSON-RPC 主路径实现并自测通过（POST /rpc 可用）；下一步调度 dev-macos-gui 进行端到端联调（ServiceClient 通过 fetch(\"/rpc\")），待 GUI 与服务集成验证完成后再推进统一交付构建与测试。",
+  "phase": "delivery",
+  "iteration": 15,
+  "reason": "dev-macos-gui 已完成基于 fetch(\"/rpc\") 的 JSON-RPC 端到端联调并在工作区落盘自测证据（todo.md 与 e2e 截图）；dev-service-api 前一轮已稳定提供 POST /rpc（scan.start/status/result/cancel）。本轮开发阶段目标已闭合，推进至交付阶段以汇总各开发产物并基于 PRD 进行独立测试。",
   "notes": [
-    "design-architect：Architecture.md 明确主路径为 HTTP + JSON-RPC，TCP 为兼容路径",
-    "dev-service-api：已实现 POST /rpc，方法族 scan.start/status/result/cancel 可用，工作区 todo.md/README 已记录自测",
-    "dev-macos-gui：ServiceClient.tsx + vite 代理已就绪，需在下一轮完成与服务端的 E2E 验证",
-    "交付阶段测试：在所有开发 Agent 声明完成后纳入 service 与 GUI 产物并执行独立测试",
-    "环境限制：Tauri Rust 宿主仍受 rustc < 1.88 影响，打包需在具备 1.88+ 的 macOS 环境执行"
+    "design-architect：Architecture.md 4.4.1 约定 GUI 通过 HTTP + JSON-RPC 主路径（/rpc）接入",
+    "dev-service-api：POST /rpc 可用，方法族 scan.start/status/result/cancel 已对齐并自测",
+    "dev-macos-gui：TopBar 新增‘开始扫描（联调）’入口，ServiceClient 统一封装 request()/scan.*，已在开发模式下完成一次端到端联调；证据：workspaces/dev-macos-gui/todo.md、workspaces/dev-macos-gui/e2e-tc1.png",
+    "交付阶段动作：调用 delivery-runner 在交付工作区汇总 service/cli/gui 产物，更新 release/ 与 test/case.md，执行独立用例并生成 test/failures.md（如有）",
+    "环境限制：Tauri Rust 宿主受 rustc < 1.88 影响，仅影响打包；开发模式联调不受阻，交付阶段如需打包请在 1.88+ 的 macOS 环境执行"
   ]
 }

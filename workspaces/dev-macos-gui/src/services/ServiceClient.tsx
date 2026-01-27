@@ -109,6 +109,7 @@ export class RpcError extends Error {
 }
 
 const JSON_RPC_ENDPOINT = "/rpc";
+const JSON_RPC_TIMEOUT_MS = 10_000; // 默认 10 秒超时，避免请求挂死
 
 interface JsonRpcResponse<TResult> {
   jsonrpc?: string;
@@ -117,9 +118,13 @@ interface JsonRpcResponse<TResult> {
   error?: { code: number; message: string; data?: unknown } | null;
 }
 
-async function callJsonRpc<TResult, TParams = unknown>(
+/**
+ * 统一 JSON-RPC 请求入口，封装 HTTP/网络错误与 JSON-RPC error 字段。
+ */
+export async function request<TResult, TParams = unknown>(
   method: string,
-  params?: TParams
+  params?: TParams,
+  timeoutMs: number = JSON_RPC_TIMEOUT_MS
 ): Promise<TResult> {
   const payload = {
     jsonrpc: "2.0" as const,
@@ -129,21 +134,37 @@ async function callJsonRpc<TResult, TParams = unknown>(
   };
 
   let res: Response;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
   try {
     res = await fetch(JSON_RPC_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
   } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new RpcError(
+        "network",
+        "JSON-RPC 请求超时，请确认本地服务是否已启动",
+        undefined,
+        e
+      );
+    }
     throw new RpcError(
       "network",
       "无法连接到本地 JSON-RPC 服务（127.0.0.1:1234）",
       undefined,
       e
     );
+  } finally {
+    window.clearTimeout(timer);
   }
 
   let json: JsonRpcResponse<TResult>;
@@ -209,9 +230,8 @@ function createServiceClient(
       options?: ScanOptions
     ): Promise<{ taskId: string }> {
       try {
-        const result = await callJsonRpc<{ task_id: string }>("scan.start", {
-          // 同时传递 path 与 root_path 以兼容早期实现
-          path,
+        const result = await request<{ task_id: string }>("scan.start", {
+          // 仅传递 root_path，服务端通过 serde alias 兼容早期使用 `path` 的实现
           root_path: path,
           ...options
         });
@@ -225,7 +245,7 @@ function createServiceClient(
 
     async getStatus(taskId: string): Promise<ScanStatus> {
       try {
-        const raw = await callJsonRpc<ScanStatus>("scan.status", {
+        const raw = await request<ScanStatus>("scan.status", {
           task_id: taskId
         });
         markConnected();
@@ -241,7 +261,7 @@ function createServiceClient(
 
     async getResult(taskId: string): Promise<ScanResultPayload> {
       try {
-        const result = await callJsonRpc<ScanResultPayload>("scan.result", {
+        const result = await request<ScanResultPayload>("scan.result", {
           task_id: taskId
         });
         markConnected();
@@ -254,7 +274,9 @@ function createServiceClient(
 
     async cancel(taskId: string): Promise<{ canceled: boolean }> {
       try {
-        const result = await callJsonRpc<{ task_id?: string; canceled?: boolean } | null>(
+        const result = await request<
+          { task_id?: string; canceled?: boolean } | null
+        >(
           "scan.cancel",
           { task_id: taskId }
         );
@@ -269,6 +291,38 @@ function createServiceClient(
       }
     }
   };
+}
+
+// ---- 与 PRD/Architecture 约定一致的最小 JSON-RPC API ----
+
+export async function scanStart(
+  params: {
+    path?: string;
+    root_path?: string;
+    threads?: number;
+    min_size?: string | number;
+    limit?: number;
+    exclude_patterns?: string[];
+    stale_days?: number;
+  } = {
+    path: ".",
+    limit: 10
+  }
+): Promise<{ task_id: string }> {
+  // 为兼容服务端既支持 `root_path` 又接受历史上的 `path` 字段，这里允许两者并存。
+  return request<{ task_id: string }>("scan.start", params);
+}
+
+export async function scanStatus(taskId: string): Promise<ScanStatus> {
+  return request<ScanStatus>("scan.status", { task_id: taskId });
+}
+
+export async function scanResult(taskId: string): Promise<ScanResultPayload> {
+  return request<ScanResultPayload>("scan.result", { task_id: taskId });
+}
+
+export async function scanCancel(taskId: string): Promise<unknown> {
+  return request<unknown>("scan.cancel", { task_id: taskId });
 }
 
 export const ServiceClientProvider: React.FC<React.PropsWithChildren> = ({
