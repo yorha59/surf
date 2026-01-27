@@ -1,11 +1,11 @@
 {
   "phase": "delivery",
-  "iteration": 33,
-  "reason": "交付节点完成聚合与独立回归：CLI/服务用例均 PASS，无失败用例；GUI 端到端未自动执行，保留已知风险与人工验收建议。全局阶段暂留在交付以便补充 GUI/大规模性能验收或生成对外发布说明。",
+  "iteration": 34,
+  "reason": "交付节点已补充发布小结与快速上手指南；测试矩阵维持 7 PASS / 0 FAIL / 1 NOT_RUN（GUI-1 为人工/集成验收）。阶段继续停留在交付，等待 GUI 人工/集成验证或发布决策。",
   "notes": [
-    "聚合产物：release/cli/surf-macos-x86_64，release/service/surf-service-macos-x86_64，release/gui/Surf.app，release/installer/Surf-macos-aarch64.dmg",
+    "构建产物：release/cli/surf-macos-x86_64；release/service/surf-service-macos-x86_64；release/gui/Surf.app；release/installer/Surf-macos-aarch64.dmg",
     "测试统计：总 8，执行 7，PASS 7，FAIL 0，NOT_RUN 1（GUI-1）",
-    "test/case.md 与 test/failures.md 已更新：本轮无失败用例，仅记录未覆盖场景与风险",
-    "建议后续动作：在 macOS 上人工/集成执行 GUI-1；或进入发布说明与交付输出整理"
+    "BUILD-REPORT.md 已更新（新增发布小结与快速上手）；test/case.md 的 GUI-1 明确为人工/集成测试并给出 checklist",
+    "下一步建议：在 macOS 上执行 GUI-1 人工/集成验收；或基于现有报告进入对外发布说明/部署协作"
   ]
 }

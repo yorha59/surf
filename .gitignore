@@ -1,10 +1,5 @@
 # 测试临时文件与快照，避免跟随仓库提交
 
-# 交付阶段测试临时目录与输出
-workspaces/delivery-runner/test/tmp/
-workspaces/delivery-runner/test/out-*.json
-workspaces/delivery-runner/test/out-*.txt
-
 # 交付工作区整体（交付阶段的构建与测试产物，不随仓库提交）
 workspaces/delivery-runner/
 
