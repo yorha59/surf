@@ -1,11 +1,11 @@
 {
   "phase": "delivery",
-  "iteration": 35,
-  "reason": "已将 GUI-1 人工/集成验收登记到 human.md，等待人类在具备图形界面的 macOS 上执行并给出决策；阶段继续停留在交付。",
+  "iteration": 36,
+  "reason": "requirements-manager 已规范化 human.md 中 GUI-1 待办并在 PRD 验收标准中补充 GUI 连通服务与结果一致性子项；仍需人类在具备图形界面的 macOS 上执行 GUI-1 验收，交付阶段继续等待。",
   "notes": [
-    "构建产物：release/cli/surf-macos-x86_64；release/service/surf-service-macos-x86_64；release/gui/Surf.app；release/installer/Surf-macos-aarch64.dmg",
+    "构建产物：workspaces/delivery-runner/release/cli/surf-macos-x86_64；workspaces/delivery-runner/release/service/surf-service-macos-x86_64；workspaces/delivery-runner/release/gui/Surf.app；workspaces/delivery-runner/release/installer/Surf-macos-aarch64.dmg",
     "测试统计：总 8，执行 7，PASS 7，FAIL 0，NOT_RUN 1（GUI-1）",
-    "human.md 已新增条目：GUI-1 人工/集成验收未执行，需在 macOS 上完成端到端验证（报告Agent: requirements-manager）",
-    "交付工作区 BUILD-REPORT.md 与 test/case.md 记录了 GUI-1 的人工验收步骤，可按其执行"
+    "human.md GUI-1 待办已按模板精炼为 5 个可执行步骤，等待在人类决策字段填写结果",
+    "PRD.md 验收标准已新增：GUI 在有图形界面的 macOS 上通过 /rpc 连通本地服务并完成最小扫描，Treemap/列表结果与同一路径下 CLI/服务输出在数量级和排序上一致"
   ]
 }
